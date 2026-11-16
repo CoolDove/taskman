@@ -30,9 +30,9 @@ stays **immersive**.
 ### [KeyMapper](https://github.com/keymapperorg/KeyMapper)
 
 As the name says, it's a key mapper. I use KeyMapper to map a button to launch TaskMan. TAht
-makes me totally forget the system built-in recent screen. Also for immersiveness.
+makes me totally forget the system built-in recent screen. Also for **immersiveness**.
 
 ## ⚠️
 
 This software is entirely vibe coded with Deepseek AI. I personally know nothing about
-AndroidDev. But if you find any issues, feel free to open an Issue or PR.
+Android dev. But if you find any issues, feel free to open an Issue or PR.
