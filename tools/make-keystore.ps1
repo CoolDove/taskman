@@ -1,4 +1,9 @@
-﻿# 生成 TaskMan 的 release keystore —— 只需要跑一次。
+﻿# 生成个人 release keystore（dove.jks）—— 只需要跑一次。
+#
+# 一个 keystore 可以放多把 key，每个项目用一个 alias：
+#   tools\make-keystore.ps1                          # 建容器 + alias taskman（TaskMan 用）
+#   tools\make-keystore.ps1 -Alias myapp -Force      # 用 -Force 才会忽略“已存在”直接加新条目
+# 想给别的项目单独加 key 而不动已有的，用 keytool -genkeypair -alias <新名> 指向同一个文件即可。
 #
 # 用法（推荐：密码当场输入，不回显、也不进 shell 历史）：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\make-keystore.ps1
@@ -7,13 +12,13 @@
 #   $env:DOVE_KEYSTORE_PASS = '密码'; powershell -NoProfile -ExecutionPolicy Bypass -File tools\make-keystore.ps1
 #
 # 关键约定：
-#   - keystore 放在用户目录（默认 ~\.android-keys\taskman-release.jks），永远不进仓库；
+#   - keystore 放在用户目录（默认 ~\.android-keys\dove.jks），永远不进仓库；
 #     生成后路径写进用户环境变量 DOVE_ANDROID_KEYSTORE，build.ps1 / build.sh 自动读取。
 #   - 同时写一份 ~\.android-keys\keystore.properties（含密码），构建脚本没拿到环境变量时读它。
 #   - 密码文件必须和 keystore 一起备份到别处。keystore 丢了 = 已安装用户再也无法升级，
 #     只能换包名重新发版。
 param(
-    [string]$Path = (Join-Path $env:USERPROFILE ".android-keys\taskman-release.jks"),
+    [string]$Path = (Join-Path $env:USERPROFILE ".android-keys\dove.jks"),
     [string]$Alias = "taskman",
     [string]$Dname = "CN=CoolDove, OU=Personal, O=CoolDove, C=CN",
     [int]$ValidityDays = 10000,
