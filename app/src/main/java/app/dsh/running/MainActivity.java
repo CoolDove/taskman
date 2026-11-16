@@ -14,6 +14,8 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
@@ -102,6 +104,9 @@ public class MainActivity extends Activity implements CarouselView.Listener {
 
     private static final String PREFS = "taskman";
     private static final String KEY_PKGS = "recent_pkgs";
+
+    /** 已解码并模糊好的缩略图底图，按包名缓存（亮暗切换重建界面时不用重新拉）。 */
+    private final Map<String, Bitmap> artCache = new HashMap<>();
 
     private final Runnable shizukuPoll = new Runnable() {
         @Override
@@ -1321,12 +1326,23 @@ public class MainActivity extends Activity implements CarouselView.Listener {
             card.setOutlineSpotShadowColor(t.shadow);
         }
 
-        // 图标区：拿不到任务截图，就用大图标压在柔和渐变块上（对应设计稿里的缩略图位）
+        // 图标区：系统任务缩略图模糊后铺底，上面压应用图标（拿不到截图就只剩渐变块）
         FrameLayout art = new FrameLayout(this);
         GradientDrawable artBg = new GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM, new int[]{t.tileTop, t.tileBottom});
         artBg.setCornerRadius(dp(Theme.RADIUS_ART));
         art.setBackground(artBg);
+        // 背景是圆角矩形 → 用它当 outline，把里面的缩略图一起裁圆，否则会露出方角
+        art.setClipToOutline(true);
+
+        ImageView shot = new ImageView(this);
+        shot.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        // 压一点不透明度让卡片主题渐变透上来；暗色下再压狠一些，否则亮色截图会把卡片冲淡
+        shot.setAlpha(t.dark ? 0.62f : 0.82f);
+        shot.setVisibility(View.GONE);
+        art.addView(shot, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
         ImageView icon = new ImageView(this);
         icon.setImageDrawable(e.icon);
         FrameLayout.LayoutParams ilp = new FrameLayout.LayoutParams(
@@ -1334,6 +1350,8 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         art.addView(icon, ilp);
         card.addView(art, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        loadArt(e, shot);
 
         TextView name = new TextView(this);
         name.setText(e.label);
@@ -1391,6 +1409,117 @@ public class MainActivity extends Activity implements CarouselView.Listener {
 
         // 长按由 CarouselView 统一识别（卡片自身不接手势），这里不再挂 listener
         return card;
+    }
+
+    /**
+     * 异步取任务缩略图 → 缩小模糊 → 当卡片图标区的底图。
+     * 拿不到（Shizuku 没连 / 系统没存 snapshot / API < 29）就什么都不做，卡片保持渐变块。
+     */
+    private void loadArt(final AppEntry e, final ImageView shot) {
+        if (e.pkg == null || e.taskId <= 0) {
+            return;
+        }
+        Bitmap cached = artCache.get(e.pkg);
+        if (cached != null) {
+            shot.setImageBitmap(cached);
+            shot.setAlpha(t.dark ? 0.62f : 0.82f);
+            shot.setVisibility(View.VISIBLE);
+            return;
+        }
+        shot.setAlpha(0f);
+        shot.setTag(e.taskId);
+        new Thread(() -> {
+            byte[] jpg = TaskBridge.snapshot(e.taskId);
+            if (jpg == null) {
+                return;
+            }
+            Bitmap raw;
+            try {
+                raw = BitmapFactory.decodeByteArray(jpg, 0, jpg.length);
+            } catch (Throwable t) {
+                return;
+            }
+            if (raw == null) {
+                return;
+            }
+            Bitmap blurred = null;
+            try {
+                blurred = blur(raw);
+            } catch (Throwable ignored) {
+            }
+            if (blurred == null) {
+                raw.recycle();
+                return;
+            }
+            if (blurred != raw) {
+                raw.recycle();
+            }
+            final Bitmap art = blurred;
+            ui.post(() -> {
+                // 卡片可能已经被重建（翻页/主题切换），tag 不一致就别往上贴了
+                if (!Integer.valueOf(e.taskId).equals(shot.getTag())) {
+                    return;
+                }
+                artCache.put(e.pkg, art);
+                shot.setImageBitmap(art);
+                shot.setVisibility(View.VISIBLE);
+                shot.animate().alpha(t.dark ? 0.62f : 0.82f).setDuration(220).start();
+            });
+        }, "art").start();
+    }
+
+    /**
+     * 缩小 + 盒式模糊。直接对 480px 宽的图做高斯太慢，先缩到 160px，模糊完再让 ImageView
+     * 放大（CENTER_CROP 自带双线性过滤），视觉上够糊且几乎不耗 CPU。
+     */
+    private static Bitmap blur(Bitmap src) {
+        int w = Math.min(96, src.getWidth());
+        if (w < 8) {
+            return null;
+        }
+        int h = Math.max(1, src.getHeight() * w / src.getWidth());
+        Bitmap small = Bitmap.createScaledBitmap(src, w, h, true);
+        int[] px = new int[w * h];
+        small.getPixels(px, 0, w, 0, 0, w, h);
+        boxBlur(px, w, h, Math.max(3, w / 10), 3);
+        small.setPixels(px, 0, w, 0, 0, w, h);
+        return small;
+    }
+
+    private static void boxBlur(int[] px, int w, int h, int r, int passes) {
+        int[] tmp = new int[px.length];
+        for (int pass = 0; pass < passes; pass++) {
+            blurLine(px, tmp, w, h, r, true);
+            blurLine(tmp, px, w, h, r, false);
+        }
+    }
+
+    /** 一维盒式模糊；horizontal=true 横着扫，否则竖着扫。 */
+    private static void blurLine(int[] in, int[] out, int w, int h, int r, boolean horizontal) {
+        int outer = horizontal ? h : w;
+        int inner = horizontal ? w : h;
+        int step = horizontal ? 1 : w;
+        for (int o = 0; o < outer; o++) {
+            int base = horizontal ? o * w : o;
+            for (int i = 0; i < inner; i++) {
+                int rr = 0, gg = 0, bb = 0, n = 0;
+                for (int k = -r; k <= r; k++) {
+                    int j = i + k;
+                    if (j < 0) {
+                        j = 0;
+                    } else if (j >= inner) {
+                        j = inner - 1;
+                    }
+                    int c = in[base + j * step];
+                    rr += (c >> 16) & 0xFF;
+                    gg += (c >> 8) & 0xFF;
+                    bb += c & 0xFF;
+                    n++;
+                }
+                out[base + i * step] = 0xFF000000
+                        | ((rr / n) << 16) | ((gg / n) << 8) | (bb / n);
+            }
+        }
     }
 
     /** Relative time in English (the UI does not follow the system locale). */

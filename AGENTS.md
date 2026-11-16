@@ -128,14 +128,37 @@ adb shell ps -A | grep shizuku_server     # 有 shell 身份的 shizuku_server �
   `ShizukuProvider`（authorities `app.dsh.running.shizuku`）、
   meta-data `moe.shizuku.client.V3_SUPPORT=true`。
 - `Shizuku.bindUserService(args, conn)`，`processNameSuffix("task")`、`daemon(true)`（进程复用，
-  连续启动是同一个 PID）、`version(2)`。
+  连续启动是同一个 PID）、`version(3)`。
   **`daemon(true)` + 固定 `version` 会复用旧进程**：改了 `TaskUserService` 却不提版本号，
   新事务号在老进程里没人处理（`transact` 直接返回 false）。**服务端代码一改就把 version 加 1**。
-- 和服务通信是**裸 binder 事务**（自定义 DESCRIPTOR + CODE_DUMP/CODE_STOP/CODE_SLEEP），不生成 AIDL。
+- 和服务通信是**裸 binder 事务**（自定义 DESCRIPTOR + CODE_DUMP/CODE_STOP/CODE_SLEEP/CODE_SNAPSHOT），
+  不生成 AIDL。
 - `TaskUserService` 必须处理 `16777115` 销毁事务（`System.exit(0)`），否则用户服务进程会越积越多
   （曾经出现过 3 个 `app.dsh.running:task`）。
 - 数据来源：`dumpsys activity recents` 文本。注意每个 task 块里的 `mActivityComponent=` 才是真包名，
   `A=10148:xxx` 是 affinity（设置会写成 `com.android.settings.root`，按它解析会漏应用）。
+
+### 任务缩略图（CODE_SNAPSHOT）—— 为什么这条路能走通
+
+系统本来就给每个任务存了截图（`TaskSnapshotController`），只是取的时候卡权限：
+
+```java
+// frameworks/base .../ActivityTaskManagerService.java (android-13.0.0_r1)
+public TaskSnapshot getTaskSnapshot(int taskId, boolean isLowResolution) {
+    mAmInternal.enforceCallingPermission(READ_FRAME_BUFFER, "getTaskSnapshot()");
+```
+
+- 普通应用没有 `READ_FRAME_BUFFER` → SecurityException（这就是「拿不到截图」的老结论）。
+- 但 **`com.android.shell` 在 AOSP 清单里就声明了它**（"System tool permissions granted to the shell"），
+  真机上 `dumpsys package com.android.shell | grep READ_FRAME_BUFFER` 是 `granted=true`。
+  用户服务跑在 uid 2000，所以**能拿到真实截图**。
+- 直接读 `/data/system_ce/0/snapshots/*.jpg` 不行：那是 DAC 权限，shell 连目录都进不去，只有 root 能读。
+- 方法签名**按版本不一样**，必须反射遍历 `IActivityTaskManager.getTaskSnapshot`：
+  本机（Thor / Android 13 ROM）是 `(int, boolean, boolean)`，AOSP 13 是 `(int, boolean)`。
+  返回的 `TaskSnapshot` → `getHardwareBuffer()` → `Bitmap.wrapHardwareBuffer()` → 拷贝成软件位图。
+- API < 29 没有 `HardwareBuffer` / `wrapHardwareBuffer` → 直接返回 null，卡片回退渐变块。
+- 回传的是**缩到 480px 宽的 JPEG**：binder 单次事务上限 1MB，别塞原图（1920×1080 ARGB 是 8MB）。
+  主进程再缩到 96px、盒式模糊 3 次，当一个 ~5KB 的底图用，按包名缓存在内存里。
 
 ## 6. 已踩过的坑（现象 → 原因 → 做法）
 
@@ -162,7 +185,10 @@ adb shell ps -A | grep shizuku_server     # 有 shell 身份的 shizuku_server �
 10. **切夜间模式后「Quickstep 屡次停止运行」**：`com.android.launcher3` 的 `RecentsActivity` 在
    配置变更重建时重复注销 receiver（`IllegalArgumentException: Receiver not registered`），
    这是系统桌面的 bug，`cmd uimode night yes/no` 每次都可能崩一次，与 TaskMan 无关。
-11. **PowerShell 里截图全是雪花/花屏**：`adb exec-out screencap -p > x.png` 会被 ps 按文本转码，
+11. **缩略图偶发 `Canvas: trying to use a recycled bitmap`**：`Bitmap.createScaledBitmap()`
+    在目标尺寸与原图完全相同时**返回原对象**而不是新图，照着「用完把旧图 recycle 掉」的写法
+    会把它回收掉（之后 ImageView 一画就崩/空白）。做法：先判 `scaled != src` 再决定 recycle。
+12. **PowerShell 里截图全是雪花/花屏**：`adb exec-out screencap -p > x.png` 会被 ps 按文本转码，
    PNG 直接损坏。必须 `cmd /c "adb ... > x.png"`。
 
 ## 7. 关键实现约定
@@ -218,7 +244,11 @@ adb shell ps -A | grep shizuku_server     # 有 shell 身份的 shizuku_server �
   顶部一行淡标题（应用图标 + TaskMan，右侧数量胶囊）→ 中间轮播 → 位置指示器 → 底部按键胶囊。
 - 卡片靠**投影**和背景分层：圆角 24dp、elevation（暗 14dp / 亮 10dp），
   API 28+ 用 `setOutlineAmbientShadowColor` / `SpotShadowColor` 调投影色。
-  上半是「图标压渐变块」的缩略图位（拿不到任务截图），下面是名称 / 包名 / 状态点。
+  上半是缩略图位：**任务截图模糊铺底 + 96dp 图标压在上面**；拿不到截图（Shizuku 没连 /
+  没有 snapshot / API < 29）就只剩主题渐变色块，功能不受影响。
+  模糊底图 `alpha` 亮 0.82 / 暗 0.62，让卡片渐变色透上来，否则亮色截图会把卡片冲淡。
+  缩略图容器必须 `setClipToOutline(true)`（outline 来自圆角背景），否则方角会盖住卡片圆角。
+- 状态行只写相对时间（前台那张是 `In foreground`），**不要**再写 “Task” / “Background” 前缀。
 - 居中那张由 `CarouselView.dispatchDraw` 画紫→粉渐变描边 + 三层递减透明度的外发光。
 - 底部 `A 打开` / `X 关闭` / `START 熄屏` 是胶囊，颜色跟着主题走（亮色白胶囊 / 暗色深胶囊），
   按键标记用 accent 色的小圆角块；应用内提示条同理（亮色深底、暗色浅底）。
@@ -322,4 +352,5 @@ adb shell input swipe 960 700 960 640 600
 
 - 普通应用无法启动 Shizuku 服务（那需要 shell/root）。TaskMan 只能「把 Shizuku 叫到前台 + 等它起来自动接管」；
   重启后仍需用 adb 命令或 Shizuku 自己的无线调试启动一次。想彻底自动化只能 root。
-- 卡片里没有应用截图（需要 Shizuku 的 shell 权限另外取 TaskSnapshot，未实现）。
+- 缩略图是系统存的**最后一张**快照，不实时更新（实现见 §5「任务缩略图」）。Shizuku 没连上 /
+  API < 29 时卡片只有主题渐变色块；底图只在当前进程内存里缓存，重新进 TaskMan 会重新取一次。

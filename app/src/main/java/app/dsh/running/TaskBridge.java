@@ -95,7 +95,7 @@ final class TaskBridge {
                     .debuggable(false)
                     // daemon 常驻会按 version 复用旧进程：服务端代码一改就必须提版本，
                     // 否则新事务号在老进程里没人处理（表现为按键没反应）
-                    .version(2)
+                    .version(3)
                     .daemon(true);
             Shizuku.bindUserService(args, new ServiceConnection() {
                 @Override
@@ -163,6 +163,34 @@ final class TaskBridge {
         } catch (Throwable t) {
             Log.e(TAG, "stop", t);
             return false;
+        } finally {
+            reply.recycle();
+            data.recycle();
+        }
+    }
+
+    /**
+     * 任务缩略图（JPEG 字节）。拿不到返回 null —— 卡片会退回「渐变块 + 图标」的样子。
+     * 只有连接上用户服务（shell 身份）才可能成功，普通应用没有 READ_FRAME_BUFFER。
+     */
+    static byte[] snapshot(int taskId) {
+        IBinder b = binder;
+        if (b == null || taskId <= 0) {
+            return null;
+        }
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(TaskUserService.DESCRIPTOR);
+            data.writeInt(taskId);
+            if (!b.transact(TaskUserService.CODE_SNAPSHOT, data, reply, 0)) {
+                return null;
+            }
+            reply.readException();
+            return reply.createByteArray();
+        } catch (Throwable t) {
+            Log.e(TAG, "snapshot", t);
+            return null;
         } finally {
             reply.recycle();
             data.recycle();
