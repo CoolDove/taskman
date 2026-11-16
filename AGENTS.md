@@ -1,0 +1,203 @@
+# AGENTS.md — TaskMan 项目上下文
+
+给后续接手这个项目的 AI / 开发者的实操笔记。**这里的每条结论都是在这台设备上真机验证过的**，
+照抄命令即可复现，不要凭常识推翻它们。
+
+## 1. 项目是什么
+
+横屏卡片轮播的「最近任务」管理器：中间一张卡片居中并高亮，左右各露半张，手柄 ←/→ 切换、
+A 打开、X 关闭、Y 切换显示范围。列表内容**必须等于系统任务管理器**，所以依赖 Shizuku 拿到
+真实任务栈（普通应用拿不到，见 §5）。
+
+- 应用名：TaskMan　包名：`app.dsh.running`（包名不要改，改了就丢 Shizuku 授权）
+- 版本：1.8（versionCode 18），minSdk 23 / targetSdk 34
+- 验证设备：AYN Thor（`kalama`，Android 13，1920×1080 横屏掌机，内置 Odin Controller + Xbox 手柄）
+- 构建/运行环境：aarch64 的 Ubuntu proot（DSH App 内），file sandbox 不可用，bash 一律
+  `sandbox_permissions: danger-full-access`（参考 `~/.dsh/AGENTS.md`）
+
+## 2. 目录结构
+
+```
+RunningApps/
+├── build.sh                      # 一键构建（aapt2 → javac → d8 → zipalign → apksigner）
+├── libs/                         # Shizuku 依赖：从 Maven aar 里解出来的 classes.jar
+│   ├── api-classes.jar           # dev.rikka.shizuku:api:13.1.5
+│   ├── provider-classes.jar      # :provider（ShizukuProvider）
+│   ├── shared-classes.jar        # :shared
+│   └── aidl-classes.jar          # :aidl（IShizukuService 等，api 的传递依赖）
+├── app/src/main/java/app/dsh/running/
+│   ├── App.java                  # Application：装崩溃日志 + 最早初始化 TaskBridge
+│   ├── MainActivity.java         # 界面、三态数据、手柄按键、任务栈解析、缓存
+│   ├── CarouselView.java         # 居中卡片轮播 + easing 滚动 + 聚焦描边 + 边缘渐隐
+│   ├── TaskBridge.java           # Shizuku 用户服务的连接管理（早绑定 / 重连 / dump / stop）
+│   ├── TaskUserService.java      # 跑在 shell 进程里的服务：dumpsys / force-stop / stack remove
+│   └── Diag.java                 # 崩溃时把堆栈写到 下载/DSH-Go/logs/
+└── app/src/main/res/             # strings / styles / 手写 PNG 图标（tools/make_icon.py 生成）
+```
+
+## 3. 构建（不要引入 Gradle）
+
+- **本机没有可用的 x86_64 SDK 工具**：`/opt/android-sdk/build-tools/34.0.0` 里只有 `d8`（jar）能跑，
+  `aapt2` / `zipalign` 是 x86 二进制会报 “required file not found”。
+  必须用 Debian 打包的 arm64 版本：`/usr/lib/android-sdk/build-tools/debian/{aapt2,zipalign,apksigner}`。
+- `./build.sh` 一条命令出包，产物 `build/TaskMan-debug.apk`（约 57KB）。工程里的 `build.gradle`
+  只是给 Android Studio 打开用的，不参与构建。
+- manifest **不带 `package` 属性**（Gradle 用 namespace），build.sh 用 `sed` 注入后再 `aapt2 link`。
+- 依赖 jar 必须**同时**出现在 `javac -classpath` 和 `d8` 的输入里，否则运行时 `NoClassDefFoundError`。
+  缺 `aidl-classes.jar` 时 d8 会警告 `moe.shizuku.server.IShizukuService$Stub not found`。
+- 没有 `zip` 命令时，build.sh 用 `python3 zipfile` 把 `classes.dex` 追加进 APK。
+- `resources.arsc` 必须保持 stored + 4 字节对齐（`zipalign -f -p 4`），否则 Android 11+ 拒装。
+- 图标是 `tools/make_icon.py` 用纯 zlib 手写 PNG 生成的（没有 Pillow），改图标重跑它即可。
+
+## 4. 设备与 adb 工作流
+
+- 设备是 **AYN Thor**（不是跑 DSH 的那台手机）。通过无线调试连接：
+
+```bash
+adb pair <host>:<pairPort> <6位配对码>     # 弹窗里的端口 = 配对端口
+adb connect <host>:<connectPort>           # 无线调试主页面上那个端口，和配对端口不是同一个
+adb devices
+```
+
+- 配对码一次性；配对端口在弹窗关闭后失效。**proot 里 mDNS 不通**，`adb mdns services` 永远是空的，
+  所以 connect 端口只能让用户从「无线调试」页面读给你。
+- 常用动作：
+
+```bash
+adb install -r build/TaskMan-debug.apk
+adb shell appops set app.dsh.running GET_USAGE_STATS allow
+adb shell am start -n app.dsh.running/.MainActivity
+adb shell input keyevent KEYCODE_DPAD_RIGHT   # 或 96=A 99=X 100=Y 187=APP_SWITCH
+adb exec-out screencap -p > shot.png
+adb shell dumpsys activity recents | grep -E '^\s+\* Recent #'
+adb shell pidof <pkg>
+```
+
+- 重启后 adb 端口会变、**Shizuku 服务也会停**（它是 `adb shell` 拉起来的），都需要重新做。
+- 应用会「离开即关闭」（`onPause` → `finishAndRemoveTask`），所以截图必须在它前台时抓；
+  `am start` 之后再 `screencap`，中间别按 HOME。
+
+## 5. 为什么必须用 Shizuku（已经实测排除过别的路）
+
+普通应用在 Android 13 上拿不到别人的任务，三个 API 都只返回自己：
+
+```
+getRecentTasks        = app.dsh.running|
+getRunningAppProcesses= app.dsh.running|
+getRunningTasks       = app.dsh.running|
+```
+
+- 直接调隐藏接口 `android.app.IActivityTaskManager.getRecentTasks`：Android 13 直接拦
+  `Accessing hidden method ... (blocked, linking, denied)` → `NoSuchMethodError`。
+- **把 targetSdk 降到 27 也不放行**（照样 denied），而且 `IActivityTaskManager$Stub.asInterface`
+  在这台机器的 framework 里 `NoSuchMethodError`。这条路不要再试。
+- 结论：走 **Shizuku UserService**——服务进程以 shell(uid 2000) 身份运行，没有隐藏 API 限制，
+  直接用 `Runtime.exec` 执行系统命令。
+
+### 启动 Shizuku 服务（shell 身份）
+
+```bash
+APK=$(adb shell pm path moe.shizuku.privileged.api | tr -d '\r' | sed 's/^package://')
+adb shell "$(dirname $APK)/lib/arm64/libshizuku.so --apk=$APK"
+adb shell ps -A | grep shizuku_server     # 有 shell 身份的 shizuku_server 就成功
+```
+
+### 应用侧接线
+
+- manifest：`QUERY_ALL_PACKAGES`、`moe.shizuku.manager.permission.API_V23`、
+  `ShizukuProvider`（authorities `app.dsh.running.shizuku`）、
+  meta-data `moe.shizuku.client.V3_SUPPORT=true`。
+- `Shizuku.bindUserService(args, conn)`，`processNameSuffix("task")`、`daemon(true)`（进程复用，
+  连续启动是同一个 PID）、`version(1)`。
+- 和服务通信是**裸 binder 事务**（自定义 DESCRIPTOR + CODE_DUMP/CODE_STOP），不生成 AIDL。
+- `TaskUserService` 必须处理 `16777115` 销毁事务（`System.exit(0)`），否则用户服务进程会越积越多
+  （曾经出现过 3 个 `app.dsh.running:task`）。
+- 数据来源：`dumpsys activity recents` 文本。注意每个 task 块里的 `mActivityComponent=` 才是真包名，
+  `A=10148:xxx` 是 affinity（设置会写成 `com.android.settings.root`，按它解析会漏应用）。
+
+## 6. 已踩过的坑（现象 → 原因 → 做法）
+
+1. **启动闪退**：`java.lang.NullPointerException ... PhoneWindow.getInsetsController()`。
+   `setDecorFitsSystemWindows` / `getInsetsController` 必须在 `setContentView()` 之后调用
+   （decor 还没创建时框架内部不判空），并且整段包 try/catch。
+2. **卡片不居中**：根布局按 `WindowInsets` 加了左右 padding，而左右不对称（右侧有 216px 的
+   cutout/导航区），把舞台挤偏。做法：舞台（CarouselView）保持满宽，只给 header/footer 加左右 inset。
+   实测居中后 ring `x=[557,1362]`，中心 959.5，屏心 960。
+3. **第一张卡片左边空着**：轮播不循环。改成 `count >= 3` 时循环（距离取模），`< 3` 时老老实实夹取。
+4. **焦点蒙版**：轮播/卡片被 focus 时系统画一层灰白半透明 `defaultFocusHighlight`。
+   做法：`setFocusable(false)` + `setFocusableInTouchMode(false)` + `setDefaultFocusHighlightEnabled(false)`。
+   按键都在 `Activity.dispatchKeyEvent` 处理，不需要 View 焦点。
+5. **系统 Toast 是大白条**，会盖住卡片。改用应用内深色小胶囊（`banner`）。
+6. **关闭应用后 1 秒又出现、系统任务面板里还有卡**：`am force-stop` 只杀进程，**不删 task**。
+   必须 `am stack remove <taskId>`（taskId 从 `Task*{...#682 ...}` 解析），顺序：先 force-stop 再 remove。
+   另外系统应用（如「设置」）的强停会被系统忽略，adb 也一样，属正常。
+7. **启动先闪一版错误列表**：先渲染 UsageStats 兜底、1~2 秒后才换成任务栈。修法见 §7「三态加载」。
+8. **崩溃排查没有 adb 时**：`Diag` 在崩溃时把堆栈经 MediaStore 写到「下载/DSH-Go/logs/」；
+   `Android/data/<pkg>` 在 proot 里读不到，别打那里的主意。`onCreate` 里出错会显示红底错误页。
+
+## 7. 关键实现约定
+
+### 轮播数学（CarouselView）
+- `cardW = 屏宽 × 0.42`，`step = 屏宽 ÷ 2` ⇒ 左右相邻卡片正好各露一半（806px 卡宽 / 403px 可见）。
+- `offset` 是浮点；`ValueAnimator` + `PathInterpolator(0.2, 0, 0, 1)`，340ms，先快后慢。
+- 每帧按 `|i - offset|` 插值缩放 1→0.86、透明度 1→0.42；中心卡片由 `dispatchDraw` 画绿色描边 + 外发光。
+- 两侧边缘各 9% 宽的渐隐（`LinearGradient`，颜色 `#0B0E13`）。
+
+### 数据三态（MainActivity）
+- `MODE_TASKS`（Shizuku 已连）→ `dumpsys` 任务栈
+- `MODE_CONNECTING`（Shizuku 在但用户服务没连上）→ **只铺上次缓存，绝不拿 UsageStats 顶替**；
+  没有缓存就显示「正在连接…」
+- `MODE_FALLBACK`（Shizuku 真不可用）→ UsageStats「仅前台/含后台」近似
+- 尽早绑定：`App.onCreate` 里 `TaskBridge.init()`，早于界面；`TaskBridge.setOnReady` 回调触发 reload。
+- 缓存：SharedPreferences `taskman/recent_pkgs`，存包名列表，卡片状态显示「任务」而非具体时间。
+- 过滤：自己、桌面 launcher、`moe.shizuku.privileged.api`。
+
+### 手柄 / 触摸
+- `DPAD_LEFT/RIGHT` 切换（长按按 repeat 限频）、`BUTTON_A(96)` / `DPAD_CENTER` / `ENTER` 打开、
+  `BUTTON_X(99)` 关闭、`BUTTON_Y(100)` 切换显示范围；另外兼容键盘模式的字母 `A/X/Y`。
+- 触摸：滑动吸附、点中间打开、点两侧滑过去、长按进系统应用详情。
+
+### 离开即关闭
+- `onPause` 里 `finishAndRemoveTask()`，不留最近任务卡片。
+- 两个例外保持存活：主动跳 Shizuku 启动（`keepAlive`）、等 Shizuku 授权弹窗
+  （`TaskBridge.permissionDialogShowing()`）。
+
+### 界面
+- 空列表只显示「无任务」（没授权时才出现「使用情况访问」按钮）。
+- 底部只留 `A 打开` / `X 关闭`；顶部只有 TaskMan + 右侧应用数量，没有模式胶囊。
+
+## 8. 改完必须跑一遍的验证
+
+```bash
+# 1) 冷启动不闪错误列表（先杀掉用户服务模拟冷启动）
+adb shell "pkill -f 'app.dsh.running:task'"
+adb shell am force-stop app.dsh.running
+adb shell am start -n app.dsh.running/.MainActivity
+sleep 0.4;  adb exec-out screencap -p > t1.png     # 首帧就应该是正确列表
+sleep 3;    adb exec-out screencap -p > t2.png     # 与 t1 内容一致
+
+# 2) X 真正结束应用
+adb shell pidof <pkg>            # 关闭前有 PID
+adb shell input keyevent 99      # X
+adb shell pidof <pkg>            # 应为空
+adb shell dumpsys activity recents | grep -c <pkg>   # 应为 0
+
+# 3) A 打开并从任务栈消失
+adb shell input keyevent 96
+adb shell dumpsys window | grep mCurrentFocus        # 焦点应切到目标应用
+adb shell dumpsys activity recents | grep -c 'A=10148:app.dsh.running'   # 应为 0
+# 10148 是这台机器上 app.dsh.running 的 uid，重装后可能变，换机器更要改
+```
+
+## 9. 发布
+
+- 版本号只改 `app/src/main/AndroidManifest.xml` 的 `versionCode` / `versionName`。
+- 产物固定叫 `build/TaskMan-debug.apk`；交付时复制到 `/sdcard/Download/DSH-Go/`
+  （注意：那是 **DSH 宿主手机**的存储，不是 Thor 的；Thor 通过 `adb install` 装）。
+- 包名不变 → 覆盖安装不会丢 Shizuku 授权。
+
+## 10. 未做 / 已知限制
+
+- 普通应用无法启动 Shizuku 服务（那需要 shell/root）。TaskMan 只能「把 Shizuku 叫到前台 + 等它起来自动接管」；
+  重启后仍需用 adb 命令或 Shizuku 自己的无线调试启动一次。想彻底自动化只能 root。
+- 卡片里没有应用截图（需要 Shizuku 的 shell 权限另外取 TaskSnapshot，未实现）。

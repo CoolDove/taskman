@@ -1,0 +1,4 @@
+// 仅为在 Android Studio 里打开工程用；本机用 ./build.sh 直接出 APK。
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}
