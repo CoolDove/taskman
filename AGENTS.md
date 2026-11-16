@@ -158,7 +158,7 @@ public TaskSnapshot getTaskSnapshot(int taskId, boolean isLowResolution) {
   返回的 `TaskSnapshot` → `getHardwareBuffer()` → `Bitmap.wrapHardwareBuffer()` → 拷贝成软件位图。
 - API < 29 没有 `HardwareBuffer` / `wrapHardwareBuffer` → 直接返回 null，卡片回退渐变块。
 - 回传的是**缩到 480px 宽的 JPEG**：binder 单次事务上限 1MB，别塞原图（1920×1080 ARGB 是 8MB）。
-  主进程再缩到 96px、盒式模糊 3 次，当一个 ~5KB 的底图用，按包名缓存在内存里。
+  主进程再缩到 192px、盒式模糊 2 次（半径 w/32），当一个 ~15KB 的底图用，按包名缓存在内存里。
 
 ## 6. 已踩过的坑（现象 → 原因 → 做法）
 

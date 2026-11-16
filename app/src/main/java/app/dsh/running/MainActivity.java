@@ -1473,7 +1473,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
      * 放大（CENTER_CROP 自带双线性过滤），视觉上够糊且几乎不耗 CPU。
      */
     private static Bitmap blur(Bitmap src) {
-        int w = Math.min(96, src.getWidth());
+        int w = Math.min(192, src.getWidth());
         if (w < 8) {
             return null;
         }
@@ -1481,7 +1481,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         Bitmap small = Bitmap.createScaledBitmap(src, w, h, true);
         int[] px = new int[w * h];
         small.getPixels(px, 0, w, 0, 0, w, h);
-        boxBlur(px, w, h, Math.max(3, w / 10), 3);
+        boxBlur(px, w, h, Math.max(2, w / 32), 2);
         small.setPixels(px, 0, w, 0, 0, w, h);
         return small;
     }
