@@ -54,7 +54,7 @@ import rikka.shizuku.Shizuku;
 /**
  * 横屏卡片轮播版：中间卡片永远居中并高亮，左右各露出半张。
  *
- * 手柄：← → 切换　A 打开　X 关闭　Y 切换「只显示前台 / 显示后台」
+ * 手柄：← → 切换　A 打开　X 关闭　Y 切换「只显示前台 / 显示后台」　START 熄屏并退出
  * 触屏：滑动切换，点中间卡片打开，点两侧卡片滑过去。
  */
 public class MainActivity extends Activity implements CarouselView.Listener {
@@ -346,6 +346,8 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         footer.addView(hint("打开"));
         footer.addView(keyCap("X"));
         footer.addView(hint("关闭"));
+        footer.addView(keyCap("START"));
+        footer.addView(hint("熄屏"));
         footerBar = footer;
         root.addView(footer);
         return root;
@@ -1012,6 +1014,33 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         toast(showBackground ? "显示后台应用" : "只显示前台应用");
     }
 
+    /**
+     * START：熄屏休眠，并顺手结束自己。
+     *
+     * 普通应用没有 DEVICE_POWER 权限，熄屏只能借 Shizuku 用户服务的 shell 身份注入
+     * KEYCODE_SLEEP。注入失败（Shizuku 没连上）时不假装成功——提示一句并留在界面上，
+     * 否则用户会看到一个「按了没反应」的黑屏假象。
+     */
+    private void sleepAndExit() {
+        keepAlive = false;
+        // 熄屏必须在 finish 之前落地：finish 之后进程随时可能被回收，binder 事务会丢
+        final boolean[] ok = {false};
+        Thread t = new Thread(() -> ok[0] = TaskBridge.sleepScreen(), "sleep-screen");
+        t.start();
+        try {
+            t.join(600);
+        } catch (InterruptedException ignored) {
+        }
+        if (!ok[0]) {
+            toast("熄屏需要先连上 Shizuku");
+            return;
+        }
+        try {
+            finishAndRemoveTask();
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void openUsageAccess() {
         try {
             startActivity(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS));
@@ -1087,6 +1116,11 @@ public class MainActivity extends Activity implements CarouselView.Listener {
             case KeyEvent.KEYCODE_Y:
                 if (down && first) {
                     toggleMode();
+                }
+                return true;
+            case KeyEvent.KEYCODE_BUTTON_START:   // 108，Odin/Xbox 手柄的 START
+                if (down && first) {
+                    sleepAndExit();
                 }
                 return true;
             default:

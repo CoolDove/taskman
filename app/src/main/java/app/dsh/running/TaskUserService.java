@@ -14,14 +14,16 @@ import java.io.InputStreamReader;
  * 这里没有隐藏 API 限制，可以直接执行系统命令拿任务栈 / 强停应用。
  *
  * 通信走裸 binder 事务（不依赖 AIDL 生成代码）：
- *   CODE_DUMP -> 返回 `dumpsys activity recents` 的文本
- *   CODE_STOP -> 参数是包名，执行 am force-stop
+ *   CODE_DUMP  -> 返回 `dumpsys activity recents` 的文本
+ *   CODE_STOP  -> 参数是包名，执行 am force-stop
+ *   CODE_SLEEP -> 注入 KEYCODE_SLEEP，让系统熄屏休眠
  */
 public class TaskUserService extends Binder {
 
     public static final String DESCRIPTOR = "app.dsh.running.TaskUserService";
     public static final int CODE_DUMP = 1;
     public static final int CODE_STOP = 2;
+    public static final int CODE_SLEEP = 3;
     /** Shizuku 用来销毁用户服务的固定事务号。 */
     private static final int CODE_DESTROY = 16777115;
 
@@ -35,7 +37,7 @@ public class TaskUserService extends Binder {
     @Override
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
             throws RemoteException {
-        if (code == CODE_DUMP || code == CODE_STOP) {
+        if (code == CODE_DUMP || code == CODE_STOP || code == CODE_SLEEP) {
             data.enforceInterface(DESCRIPTOR);
         }
         switch (code) {
@@ -54,6 +56,15 @@ public class TaskUserService extends Binder {
                     exec("/system/bin/am", "stack", "remove", String.valueOf(taskId));
                 }
                 Log.i("TaskSvc", "stop " + pkg + " task=" + taskId + " -> " + out);
+                reply.writeNoException();
+                reply.writeString(out == null ? "" : out);
+                return true;
+            }
+            case CODE_SLEEP: {
+                // KEYCODE_SLEEP(223) 直接让系统进休眠；这是电源键的「只关不唤醒」版本，
+                // 普通应用没有 DEVICE_POWER 权限，只有这里（uid shell 2000）能注入
+                String out = exec("/system/bin/input", "keyevent", "223");
+                Log.i("TaskSvc", "sleep -> " + out);
                 reply.writeNoException();
                 reply.writeString(out == null ? "" : out);
                 return true;

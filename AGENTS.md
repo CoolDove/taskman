@@ -6,11 +6,11 @@
 ## 1. 项目是什么
 
 横屏卡片轮播的「最近任务」管理器：中间一张卡片居中并高亮，左右各露半张，手柄 ←/→ 切换、
-A 打开、X 关闭、Y 切换显示范围。列表内容**必须等于系统任务管理器**，所以依赖 Shizuku 拿到
-真实任务栈（普通应用拿不到，见 §5）。
+A 打开、X 关闭、Y 切换显示范围、START 熄屏退出。列表内容**必须等于系统任务管理器**，所以依赖
+Shizuku 拿到真实任务栈（普通应用拿不到，见 §5）。
 
 - 应用名：TaskMan　包名：`app.dsh.running`（包名不要改，改了就丢 Shizuku 授权）
-- 版本：1.8（versionCode 18），minSdk 23 / targetSdk 34
+- 版本：1.9（versionCode 19），minSdk 23 / targetSdk 34
 - 验证设备：AYN Thor（`kalama`，Android 13，1920×1080 横屏掌机，内置 Odin Controller + Xbox 手柄）
 - 构建/运行环境：aarch64 的 Ubuntu proot（DSH App 内），file sandbox 不可用，bash 一律
   `sandbox_permissions: danger-full-access`（参考 `~/.dsh/AGENTS.md`）
@@ -20,6 +20,7 @@ A 打开、X 关闭、Y 切换显示范围。列表内容**必须等于系统任
 ```
 RunningApps/
 ├── build.sh                      # 一键构建（aapt2 → javac → d8 → zipalign → apksigner）
+├── build.ps1                     # 同上，Windows 工作区用（scoop android-clt）
 ├── libs/                         # Shizuku 依赖：从 Maven aar 里解出来的 classes.jar
 │   ├── api-classes.jar           # dev.rikka.shizuku:api:13.1.5
 │   ├── provider-classes.jar      # :provider（ShizukuProvider）
@@ -29,8 +30,8 @@ RunningApps/
 │   ├── App.java                  # Application：装崩溃日志 + 最早初始化 TaskBridge
 │   ├── MainActivity.java         # 界面、三态数据、手柄按键、任务栈解析、缓存
 │   ├── CarouselView.java         # 居中卡片轮播 + easing 滚动 + 聚焦描边 + 边缘渐隐
-│   ├── TaskBridge.java           # Shizuku 用户服务的连接管理（早绑定 / 重连 / dump / stop）
-│   ├── TaskUserService.java      # 跑在 shell 进程里的服务：dumpsys / force-stop / stack remove
+│   ├── TaskBridge.java           # Shizuku 用户服务的连接管理（早绑定 / 重连 / dump / stop / sleep）
+│   ├── TaskUserService.java      # 跑在 shell 进程里的服务：dumpsys / force-stop / stack remove / 熄屏
 │   └── Diag.java                 # 崩溃时把堆栈写到 下载/DSH-Go/logs/
 └── app/src/main/res/             # strings / styles / 手写 PNG 图标（tools/make_icon.py 生成）
 ```
@@ -48,6 +49,20 @@ RunningApps/
 - 没有 `zip` 命令时，build.sh 用 `python3 zipfile` 把 `classes.dex` 追加进 APK。
 - `resources.arsc` 必须保持 stored + 4 字节对齐（`zipalign -f -p 4`），否则 Android 11+ 拒装。
 - 图标是 `tools/make_icon.py` 用纯 zlib 手写 PNG 生成的（没有 Pillow），改图标重跑它即可。
+
+### Windows 侧构建（`build.ps1`）
+
+上面的 `build.sh` 只能在 aarch64 Linux/proot 里跑。在 Windows 工作区（`F:\workspc\taskman`）用
+`build.ps1`，它逐条等价于 `build.sh`，工具取自 scoop 的 `android-clt`（build-tools 36 的 x86_64 齐全）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1
+```
+
+- 差异只有两处：`android.jar` 用 `platforms/android-35`（没有 34 也能编 targetSdk 34），
+  以及没有 `zip` 时同样用 `python zipfile` 追加 `classes.dex`。
+- 脚本必须存成 **UTF-8 with BOM**，Windows PowerShell 5.1 会按 GBK 解析无 BOM 的中文注释并报语法错。
+- `javac` 的 `androidx.annotation.RestrictTo` 枚举警告来自 Shizuku 的 jar，无害，退出码仍是 0。
 
 ## 4. 设备与 adb 工作流
 
@@ -108,8 +123,10 @@ adb shell ps -A | grep shizuku_server     # 有 shell 身份的 shizuku_server �
   `ShizukuProvider`（authorities `app.dsh.running.shizuku`）、
   meta-data `moe.shizuku.client.V3_SUPPORT=true`。
 - `Shizuku.bindUserService(args, conn)`，`processNameSuffix("task")`、`daemon(true)`（进程复用，
-  连续启动是同一个 PID）、`version(1)`。
-- 和服务通信是**裸 binder 事务**（自定义 DESCRIPTOR + CODE_DUMP/CODE_STOP），不生成 AIDL。
+  连续启动是同一个 PID）、`version(2)`。
+  **`daemon(true)` + 固定 `version` 会复用旧进程**：改了 `TaskUserService` 却不提版本号，
+  新事务号在老进程里没人处理（`transact` 直接返回 false）。**服务端代码一改就把 version 加 1**。
+- 和服务通信是**裸 binder 事务**（自定义 DESCRIPTOR + CODE_DUMP/CODE_STOP/CODE_SLEEP），不生成 AIDL。
 - `TaskUserService` 必须处理 `16777115` 销毁事务（`System.exit(0)`），否则用户服务进程会越积越多
   （曾经出现过 3 个 `app.dsh.running:task`）。
 - 数据来源：`dumpsys activity recents` 文本。注意每个 task 块里的 `mActivityComponent=` 才是真包名，
@@ -155,6 +172,10 @@ adb shell ps -A | grep shizuku_server     # 有 shell 身份的 shizuku_server �
 ### 手柄 / 触摸
 - `DPAD_LEFT/RIGHT` 切换（长按按 repeat 限频）、`BUTTON_A(96)` / `DPAD_CENTER` / `ENTER` 打开、
   `BUTTON_X(99)` 关闭、`BUTTON_Y(100)` 切换显示范围；另外兼容键盘模式的字母 `A/X/Y`。
+- `BUTTON_START(108)` → 熄屏休眠 + 结束自己。普通应用没有 `DEVICE_POWER`，只能让 Shizuku 用户服务
+  以 shell 身份 `input keyevent 223`（`KEYCODE_SLEEP`，比 26 的电源键稳，只关不唤醒）。
+  注入失败（用户服务没连上）时**不假装成功**：弹「熄屏需要先连上 Shizuku」并留在界面。
+  熄屏必须在 `finishAndRemoveTask()` 之前发出，否则进程被回收、binder 事务会丢。
 - 触摸：滑动吸附、点中间打开、点两侧滑过去、长按进系统应用详情。
 
 ### 离开即关闭
@@ -164,7 +185,7 @@ adb shell ps -A | grep shizuku_server     # 有 shell 身份的 shizuku_server �
 
 ### 界面
 - 空列表只显示「无任务」（没授权时才出现「使用情况访问」按钮）。
-- 底部只留 `A 打开` / `X 关闭`；顶部只有 TaskMan + 右侧应用数量，没有模式胶囊。
+- 底部只留 `A 打开` / `X 关闭` / `START 熄屏`；顶部只有 TaskMan + 右侧应用数量，没有模式胶囊。
 
 ## 8. 改完必须跑一遍的验证
 
@@ -187,7 +208,24 @@ adb shell input keyevent 96
 adb shell dumpsys window | grep mCurrentFocus        # 焦点应切到目标应用
 adb shell dumpsys activity recents | grep -c 'A=10148:app.dsh.running'   # 应为 0
 # 10148 是这台机器上 app.dsh.running 的 uid，重装后可能变，换机器更要改
+
+# 4) START 熄屏并退出
+adb shell dumpsys power | grep mWakefulness=        # Awake
+adb shell input keyevent 108                        # START
+sleep 1.5
+adb shell dumpsys power | grep mWakefulness=        # Asleep
+adb shell dumpsys activity recents | grep -c 'app.dsh.running/.MainActivity'   # 应为 0
+adb shell input keyevent 224                        # 唤醒
+adb logcat -d -s TaskSvc                            # 应有 "sleep -> "
 ```
+
+排查按键「没反应」时的两个陷阱：
+
+- **双屏**：这台机器 launcher 在 display 0、当前应用可能落在副屏，`adb shell input keyevent`
+  默认注入 display 0，会打到 launcher 上。先 `dumpsys window | grep mCurrentFocus` 确认两行里
+  哪一行是 TaskMan，必要时用 `am start` 把它拉到前台重试。
+- **用户服务版本**：见 §5，改过 `TaskUserService` 就必须提 `.version(n)`，否则老 daemon 进程
+  收到未知事务号只会返回 false（表现为「按了没反应、也没有日志」）。
 
 ## 9. 发布
 

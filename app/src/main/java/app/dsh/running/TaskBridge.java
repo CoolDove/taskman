@@ -93,7 +93,9 @@ final class TaskBridge {
             Shizuku.UserServiceArgs args = new Shizuku.UserServiceArgs(cn)
                     .processNameSuffix("task")
                     .debuggable(false)
-                    .version(1)
+                    // daemon 常驻会按 version 复用旧进程：服务端代码一改就必须提版本，
+                    // 否则新事务号在老进程里没人处理（表现为按键没反应）
+                    .version(2)
                     .daemon(true);
             Shizuku.bindUserService(args, new ServiceConnection() {
                 @Override
@@ -160,6 +162,33 @@ final class TaskBridge {
             return true;
         } catch (Throwable t) {
             Log.e(TAG, "stop", t);
+            return false;
+        } finally {
+            reply.recycle();
+            data.recycle();
+        }
+    }
+
+    /**
+     * 熄屏并休眠（KEYCODE_SLEEP）。
+     * 注入按键需要 shell 身份，所以必须走用户服务；没连上时返回 false，由调用方提示。
+     */
+    static boolean sleepScreen() {
+        IBinder b = binder;
+        if (b == null) {
+            return false;
+        }
+        Parcel data = Parcel.obtain();
+        Parcel reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(TaskUserService.DESCRIPTOR);
+            if (!b.transact(TaskUserService.CODE_SLEEP, data, reply, 0)) {
+                return false;
+            }
+            reply.readException();
+            return true;
+        } catch (Throwable t) {
+            Log.e(TAG, "sleep", t);
             return false;
         } finally {
             reply.recycle();
