@@ -86,6 +86,8 @@ public class CarouselView extends ViewGroup {
     private boolean dismissAnimating;
     /** 关掉一张卡片后的重排动画（剩下的卡片滑到新位置）。 */
     private ValueAnimator reflowAnim;
+    /** 重排进度 0..1：焦点环跟着淡入，避免「高亮」在删掉的瞬间跳到旁边那张身上。 */
+    private float reflowAlpha = 1f;
 
     /** 长按判定：500ms 内没划动才算长按。 */
     private final Runnable longPressRunnable = new Runnable() {
@@ -169,89 +171,113 @@ public class CarouselView extends ViewGroup {
     }
 
     /**
-     * 换一批卡片，并让剩下的卡片**从旧位置滑到新位置**。
+    /**
+     * 关掉一张卡片：**就地把它从容器里抽走**，剩下的卡片用动画滑到新位置。
      *
-     * 关掉一个 app 时列表少一张，如果直接 setCards，剩下的卡片（包括原本在中间的）会
-     * 瞬间跳到新坐标，看起来像闪了一下。这里把重排前每张卡片的 x/y/缩放/透明度记下来，
-     * 重铺后先摆回旧位置，再用一个短动画推到新位置 —— 视觉上就是「抽走一张，其余补位」。
-     *
-     * @param removedIndex 被移除的那张在旧列表里的下标；< 0 时退化成普通 setCards
+     * 之前的做法是整批重建视图（removeAllViews + addView），有两个副作用：
+     *   1) 新建 ImageView / TextView 发生在退场动画结束的那一帧，容易掉帧；
+     *   2) 新视图要先摆回旧位置再补间，中间会有一帧露出「最终位置」，看着像闪一下。
+     * 现在视图全部复用，只是 removeViewAt + 补间，没有任何重建。
      */
-    public void setCardsAnimated(List<View> cards, int initial, int removedIndex) {
-        int oldCount = getChildCount();
-        float[] ox = null, oy = null, os = null, oa = null;
-        if (removedIndex >= 0 && removedIndex < oldCount && oldCount > 1) {
-            ox = new float[oldCount];
-            oy = new float[oldCount];
-            os = new float[oldCount];
-            oa = new float[oldCount];
-            for (int i = 0; i < oldCount; i++) {
-                View c = getChildAt(i);
-                ox[i] = c.getX();
-                oy[i] = c.getY();
-                os[i] = c.getScaleX();
-                oa[i] = c.getAlpha();
-            }
+    public void removeCard(int index) {
+        int n = getChildCount();
+        if (index < 0 || index >= n) {
+            return;
         }
-        setCards(cards, initial);
-        if (ox == null || cardW == 0 || getChildCount() == 0) {
+        stopAnim();
+        cancelSwipeAnim();
+        cancelReflow();
+        dismissAnimating = false;
+        swipeIndex = -1;
+        swipeDy = 0f;
+        swipeAlpha = 1f;
+        swipeScale = 1f;
+
+        // 记录抽走之前每张卡的实际位置（重排动画的起点）
+        float[] ox = new float[n], oy = new float[n], os = new float[n], oa = new float[n];
+        for (int i = 0; i < n; i++) {
+            View c = getChildAt(i);
+            ox[i] = c.getX();
+            oy[i] = c.getY();
+            os[i] = c.getScaleX();
+            oa[i] = c.getAlpha();
+        }
+
+        removeViewAt(index);
+        count = getChildCount();
+        if (count > 0) {
+            // 被删的那张后面的卡片整体前移一位，所以 offset 仍指向 index（越界则夹到最后一张）
+            offset = wrap(Math.min(index, count - 1));
+        } else {
+            offset = 0;
+        }
+        lastSelected = getSelected();
+        if (count == 0 || cardW == 0) {
+            invalidate();
             return;
         }
 
-        int n = getChildCount();
-        float[] fx = new float[n], fy = new float[n], fs = new float[n], fa = new float[n];
-        float[] sx = new float[n], sy = new float[n], ss = new float[n], sa = new float[n];
+        int m = count;
+        float[] sx = new float[m], sy = new float[m], ss = new float[m], sa = new float[m];
+        float[] fx = new float[m], fy = new float[m], fs = new float[m], fa = new float[m];
+        float[] t = new float[4];
+        for (int i = 0; i < m; i++) {
+            int oi = i < index ? i : i + 1;
+            sx[i] = ox[oi];
+            sy[i] = oy[oi];
+            ss[i] = os[oi];
+            sa[i] = oa[oi];
+            layoutOf(i, t);
+            fx[i] = t[0];
+            fy[i] = t[1];
+            fs[i] = t[2];
+            fa[i] = t[3];
+        }
+        startReflow(sx, sy, ss, sa, fx, fy, fs, fa);
+    }
+
+    /** 把每张卡片从 (sx,sy,ss,sa) 补间到 (fx,fy,fs,fa)，并把焦点环淡入。 */
+    private void startReflow(float[] sx, float[] sy, float[] ss, float[] sa,
+                             float[] fx, float[] fy, float[] fs, float[] fa) {
+        final int n = getChildCount();
+        if (n == 0 || fx.length < n) {
+            return;
+        }
+        // 位移超过一张卡片的，别让它横穿屏幕（比如剩下的数量跨过循环阈值时）：
+        // 在原地淡出、到新位置再淡入，中间的空档由「滑到中间」的那张补上
+        final boolean[] far = new boolean[n];
         for (int i = 0; i < n; i++) {
+            far[i] = Math.abs(fx[i] - sx[i]) > 1.2f * step;
             View c = getChildAt(i);
-            fx[i] = c.getX();
-            fy[i] = c.getY();
-            fs[i] = c.getScaleX();
-            fa[i] = c.getAlpha();
-            // 新列表里第 i 张 = 旧列表里被删那张之后的元素整体前移一位
-            int oi = i < removedIndex ? i : i + 1;
-            if (oi >= 0 && oi < oldCount) {
-                sx[i] = ox[oi];
-                sy[i] = oy[oi];
-                ss[i] = os[oi];
-                sa[i] = oa[oi];
-            } else {
-                sx[i] = fx[i];
-                sy[i] = fy[i];
-                ss[i] = fs[i];
-                sa[i] = fa[i];
-            }
+            c.setPivotX(cardW / 2f);
+            c.setPivotY(cardH / 2f);
             c.setX(sx[i]);
             c.setY(sy[i]);
             c.setScaleX(ss[i]);
             c.setScaleY(ss[i]);
             c.setAlpha(sa[i]);
         }
+        // 焦点环从 0 淡入，否则「谁被高亮」会在删掉的瞬间突然跳到旁边那张身上
+        reflowAlpha = 0f;
         invalidate();
-
-        // 位移超过一张卡片的，别让它横穿屏幕（比如 3 张变 2 张时左边那张要跑到右边）：
-        // 那种情况在原地淡出、到新位置再淡入，中间的空档由「滑到中间」的那张补上
-        final boolean[] far = new boolean[n];
-        for (int i = 0; i < n; i++) {
-            far[i] = Math.abs(fx[i] - sx[i]) > 1.2f * step;
-        }
 
         reflowAnim = ValueAnimator.ofFloat(0f, 1f);
         reflowAnim.setDuration(320);
         reflowAnim.setInterpolator(ease);
         reflowAnim.addUpdateListener(a -> {
             float f = (Float) a.getAnimatedValue();
-            for (int i = 0; i < getChildCount(); i++) {
+            // 焦点环晚点出场：卡片快到位时才开始亮，避免环「悬」在半路上的卡片外面
+            reflowAlpha = Math.max(0f, Math.min(1f, (f - 0.55f) / 0.45f));
+            for (int i = 0; i < getChildCount() && i < n; i++) {
                 View c = getChildAt(i);
                 if (far[i]) {
                     if (f < 0.5f) {
-                        // 前半段：留在旧位置淡出
                         c.setX(sx[i]);
                         c.setY(sy[i]);
                         c.setScaleX(ss[i]);
                         c.setScaleY(ss[i]);
                         c.setAlpha(sa[i] * (1f - f / 0.5f));
                     } else {
-                        // 后半段：直接出现在新位置淡入
                         c.setX(fx[i]);
                         c.setY(fy[i]);
                         c.setScaleX(fs[i]);
@@ -274,6 +300,7 @@ public class CarouselView extends ViewGroup {
             @Override
             public void onAnimationEnd(Animator animation) {
                 reflowAnim = null;
+                reflowAlpha = 1f;
                 relayout();
             }
         });
@@ -391,6 +418,7 @@ public class CarouselView extends ViewGroup {
 
     /** 结束／取消重排动画（立刻落到最终位置）。 */
     private void cancelReflow() {
+        reflowAlpha = 1f;
         if (reflowAnim != null) {
             ValueAnimator a = reflowAnim;
             reflowAnim = null;
@@ -503,7 +531,10 @@ public class CarouselView extends ViewGroup {
     private float distance(int i) {
         float d = i - offset;
         if (!loops()) {
-            return d;
+            // 只剩两张时不循环，默认会把「另一张」摆在右边；这里左右翻一下，
+            // 让它待在左边 —— 这样从 3 张关到 2 张时，左边那张原地不动，
+            // 只有右边那张滑到中间，不需要横穿屏幕（也就没有淡出淡入的闪动）
+            return count == 2 ? -d : d;
         }
         float half = count / 2f;
         while (d > half) {
@@ -546,7 +577,25 @@ public class CarouselView extends ViewGroup {
             c.setPivotX(cardW / 2f);
             c.setPivotY(cardH / 2f);
         }
-        relayout();
+        // 重排动画进行中不能被布局「拉回终点」：removeViewAt 会 requestLayout，
+        // 这一帧如果照常 relayout()，会先闪一帧「最终位置」再回到起点做动画
+        if (reflowAnim == null) {
+            relayout();
+        }
+    }
+
+    /** 卡片 i 在静止状态下的 x / y / 缩放 / 透明度，写进 out[4]。 */
+    private void layoutOf(int i, float[] out) {
+        int w = getWidth();
+        int h = getHeight();
+        float cx = (w - cardW) / 2f;
+        float cy = (h - cardH) / 2f;
+        float d = distance(i);
+        float f = Math.min(1f, Math.abs(d));
+        out[0] = cx + d * step;
+        out[1] = cy;
+        out[2] = 1f - (1f - SCALE_MIN) * f;
+        out[3] = 1f - (1f - alphaMin()) * f;
     }
 
     private void relayout() {
@@ -601,7 +650,7 @@ public class CarouselView extends ViewGroup {
         rect.set(cx - hw, cy - hh, cx + hw, cy + hh);
 
         // 焦点环跟着卡片一起淡出（上滑退场时不能留下一个孤零零的环）
-        int cardAlpha = Math.round(c.getAlpha() * 255f);
+        int cardAlpha = Math.round(c.getAlpha() * reflowAlpha * 255f);
         if (cardAlpha < 6) {
             return;
         }
@@ -779,6 +828,22 @@ public class CarouselView extends ViewGroup {
         }
     }
 
+    /**
+     * 触点方向对应的那张卡片下标。
+     * 两张卡片时不循环，且「另一张」固定在左边（见 {@link #distance}），所以左右点都是换到那一张。
+     */
+    private int neighborIndex(int dir) {
+        int sel = getSelected();
+        if (count == 2) {
+            return 1 - sel;
+        }
+        int i = sel + dir;
+        if (loops()) {
+            return wrap(i);
+        }
+        return i >= 0 && i < count ? i : sel;
+    }
+
     private void handleTap(float x) {
         if (count <= 0 || getWidth() == 0) {
             return;
@@ -789,7 +854,7 @@ public class CarouselView extends ViewGroup {
                 listener.onActivate(getSelected());
             }
         } else {
-            smoothTo(Math.round(offset) + (d > 0 ? 1 : -1));
+            smoothTo(neighborIndex(d > 0 ? 1 : -1));
         }
     }
 
@@ -802,12 +867,7 @@ public class CarouselView extends ViewGroup {
         if (Math.abs(d) < 0.5f) {
             return getSelected();
         }
-        int dir = d > 0 ? 1 : -1;
-        int i = getSelected() + dir;
-        if (loops()) {
-            return wrap(i);
-        }
-        return i >= 0 && i < count ? i : getSelected();
+        return neighborIndex(d > 0 ? 1 : -1);
     }
 
     @Override

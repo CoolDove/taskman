@@ -553,6 +553,11 @@ public class MainActivity extends Activity implements CarouselView.Listener {
                     showCrash(fail);
                     return;
                 }
+                // 重建视图会重新创建卡片（缩略图重贴、正在进行的重排动画被打断），
+                // 所以内容没变就别重铺 —— 关掉一个 app 后紧接着的这次 reload 通常就是这种情况
+                final List<AppEntry> prevTasks = new ArrayList<>(taskList);
+                final List<AppEntry> prevAll = new ArrayList<>(all);
+                final int prevMode = mode;
                 all.clear();
                 if (u != null) {
                     all.addAll(u);
@@ -569,6 +574,10 @@ public class MainActivity extends Activity implements CarouselView.Listener {
                 } else {
                     mode = MODE_FALLBACK;
                 }
+                if (mode == prevMode && sameEntries(prevTasks, taskList)
+                        && sameEntries(prevAll, all)) {
+                    return;
+                }
                 try {
                     buildCards();
                 } catch (Throwable x) {
@@ -576,6 +585,23 @@ public class MainActivity extends Activity implements CarouselView.Listener {
                 }
             });
         }, "scan").start();
+    }
+
+    /** 两份列表是不是「同一批卡片」（只看影响界面的字段，时间戳不参与比较）。 */
+    private static boolean sameEntries(List<AppEntry> a, List<AppEntry> b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (int i = 0; i < a.size(); i++) {
+            AppEntry x = a.get(i);
+            AppEntry y = b.get(i);
+            if (!x.pkg.equals(y.pkg) || x.taskId != y.taskId
+                    || x.resumed != y.resumed || x.fromTask != y.fromTask
+                    || x.cached != y.cached) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private String loadCachedPkgs() {
@@ -815,7 +841,8 @@ public class MainActivity extends Activity implements CarouselView.Listener {
             cards.add(buildCard(e));
         }
         int initial = 0;
-        if (mode == MODE_FALLBACK && keep != null) {
+        if (keep != null) {
+            // 重建时保持「当前这张」还在中间，否则列表一变（新增/关闭其它应用）就会跳回第一张
             for (int i = 0; i < shown.size(); i++) {
                 if (shown.get(i).pkg.equals(keep)) {
                     initial = i;
@@ -1117,31 +1144,17 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         if (index < 0 || index >= shown.size()) {
             return;
         }
-        AppEntry e = shown.get(index);
-        boolean ok;
-        if (mode == MODE_TASKS) {
-            // Shizuku 走 shell 的 force-stop，前台应用也能结束
-            ok = TaskBridge.stop(e.pkg, e.taskId);
-        } else {
-            ok = true;
-            try {
-                ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-                am.killBackgroundProcesses(e.pkg);
-            } catch (Exception ex) {
-                ok = false;
-            }
-        }
+        final AppEntry e = shown.get(index);
+        final boolean viaShizuku = mode == MODE_TASKS;
 
+        // 先把卡片抽走、让重排动画立刻开始。force-stop / stack remove 是 binder + 两次
+        // exec（100~300ms），放在主线程会把动画卡住，所以丢到后台线程
         all.remove(e);
         shown.remove(index);
-
-        List<View> cards = new ArrayList<>();
-        for (AppEntry x : shown) {
-            cards.add(buildCard(x));
-        }
-        int next = Math.min(index, Math.max(0, shown.size() - 1));
-        // 用带重排动画的版本：剩下的卡片从旧位置滑到新位置，不会「闪」一下跳过去
-        carousel.setCardsAnimated(cards, next, index);
+        // taskList 里也要去掉，否则下一次 reload 重建卡片时关掉的应用会「复活」
+        taskList.remove(e);
+        // 视图就地抽掉一张（不重建、不重新加载缩略图），剩下的卡片补间滑到新位置
+        carousel.removeCard(index);
 
         boolean empty = shown.isEmpty();
         carousel.setVisibility(empty ? View.INVISIBLE : View.VISIBLE);
@@ -1151,9 +1164,29 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         }
         updateHeader();
         updateDots();
-        toast((ok ? "Closed · " : "Close failed · ") + e.label);
-        // 稍后重新读一次任务栈，保证列表和系统一致
-        ui.postDelayed(this::reload, 800);
+
+        new Thread(() -> {
+            boolean ok;
+            if (viaShizuku) {
+                // Shizuku 走 shell 的 force-stop，前台应用也能结束
+                ok = TaskBridge.stop(e.pkg, e.taskId);
+            } else {
+                ok = true;
+                try {
+                    ActivityManager am =
+                            (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+                    am.killBackgroundProcesses(e.pkg);
+                } catch (Exception ex) {
+                    ok = false;
+                }
+            }
+            final boolean done = ok;
+            ui.post(() -> {
+                toast((done ? "Closed · " : "Close failed · ") + e.label);
+                // 稍后重新读一次任务栈，保证列表和系统一致
+                ui.postDelayed(this::reload, 600);
+            });
+        }, "close-app").start();
     }
 
     private void toggleMode() {

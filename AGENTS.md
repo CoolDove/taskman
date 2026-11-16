@@ -232,11 +232,19 @@ public TaskSnapshot getTaskSnapshot(int taskId, boolean isLowResolution) {
   退场动画期间新的触摸会被丢弃（`G_BLOCKED`），避免把卡片拽回来。
 - **X 键与上滑共用同一套动效**：`closeCurrent()` 调 `carousel.dismissCurrent()`，不再直接改列表。
   焦点环（`dispatchDraw`）的透明度跟随卡片 alpha，否则卡片淡出了环还留着。
-- **关闭后的重排动画**：`CarouselView.setCardsAnimated(cards, next, removedIndex)` —— 重铺前先记下
-  每张旧卡片的 x/y/缩放/透明度，重铺后按 `i < removed ? i : i + 1` 的映射把新卡片摆回旧位置，
-  再用 320ms ease-out 推到新位置（不这么做的话，关掉一张后剩下的卡片会瞬间跳一格）。
-  位移超过 1.2 张卡片的（3 张变 2 张时左边那张要跑到右边）**不横穿屏幕**，改成原地淡出、
-  到新位置再淡入，中间的空档由滑到中间的那张补上。
+- **关闭后的重排动画**：`closeIndex` 先 `shown/all/taskList.remove` + `carousel.removeCard(index)`
+  把卡片**就地抽走**（视图全部复用，不重建、不重贴缩略图），剩下的卡片用 320ms ease-out 补间到新位置。
+  三个关键点，缺一个就会出现「闪一下 / 顿一下」：
+  1. `removeViewAt` 会触发 `requestLayout`，所以 `onLayout` 里 **reflow 进行中必须跳过 `relayout()`**，
+     否则会先画一帧「最终位置」再跳回起点做动画（就是那一下闪）。
+  2. `force-stop` + `am stack remove` 是 binder + 两次 exec（100~300ms），**必须放后台线程**，
+     否则退场动画结束后主线程被占住，画面静止 10 帧以上，看着像卡死。
+  3. 焦点环跟着 reflow 淡入（`reflowAlpha = (f-0.55)/0.45`），不要一删就跳到旁边那张身上。
+- **两张卡片时不循环**：`distance()` 对 `count == 2` 取负，让「另一张」待在左边。这样从 3 张关到
+  2 张时左边那张原地不动、只有右边那张滑到中间；否则它会横穿屏幕和居中卡片叠在一起。
+  `neighborIndex()` 里对 2 张的情况特判成「换到另一张」，点按 / 长按判定也走它。
+- `reload()` 拿到的列表和当前一致时**不重建卡片**（`sameEntries()` 只比 pkg/taskId/resumed 等），
+  重建会重新创建视图、打断正在跑的重排动画。
 
 ### 离开即关闭
 - `onPause` 里 `finishAndRemoveTask()`，不留最近任务卡片。
