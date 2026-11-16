@@ -13,8 +13,8 @@ with buttons.
 ## Requirements
 
 - Android 6.0+ (minSdk 23), landscape.
-- [Shizuku](https://shizuku.rikka.app/). This is important, you need to install and config
-  this so that TaskMan can get required extra permission.
+- [Shizuku](https://shizuku.rikka.app/). **THIS IS IMPORTANT!** You need to install and config
+  this so that TaskMan can get required extra permissions.
 
 ## Recommendations
 
