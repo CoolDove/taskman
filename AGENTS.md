@@ -179,7 +179,10 @@ adb shell ps -A | grep shizuku_server     # 有 shell 身份的 shizuku_server �
   没有缓存就显示 “Connecting…”
 - `MODE_FALLBACK`（Shizuku 真不可用）→ UsageStats「仅前台/含后台」近似
 - 尽早绑定：`App.onCreate` 里 `TaskBridge.init()`，早于界面；`TaskBridge.setOnReady` 回调触发 reload。
-- 缓存：SharedPreferences `taskman/recent_pkgs`，存包名列表，卡片状态显示 “Task” 而非具体时间。
+- 缓存：SharedPreferences `taskman/recent_pkgs`，每行 `pkg|lastActive`（旧格式只有 `pkg`，
+  读的时候容错，时间缺省 0），所以冷启动铺缓存时卡片也能显示相对时间。
+- 卡片状态行**只写时间**（`just now` / `N min ago`），前台那张写 “In foreground”；
+  不要再用 “Task” / “Background” 这类前缀词。
 - 界面文字**一律英文**（应用不跟随系统语言，`rel()` 也是手写的 “just now / N min ago”，
   别用 `DateUtils.getRelativeTimeSpanString()`，它会跟着系统 locale 变中文）。
 - 过滤：自己、桌面 launcher、`moe.shizuku.privileged.api`。

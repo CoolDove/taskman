@@ -584,7 +584,8 @@ public class MainActivity extends Activity implements CarouselView.Listener {
     private void saveCachedPkgs(List<AppEntry> list) {
         StringBuilder sb = new StringBuilder();
         for (AppEntry e : list) {
-            sb.append(e.pkg).append('\n');
+            // pkg|lastActive：有时间和没有时间的旧缓存都能读（旧格式只有 pkg）
+            sb.append(e.pkg).append('|').append(e.lastActive).append('\n');
         }
         try {
             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
@@ -599,14 +600,26 @@ public class MainActivity extends Activity implements CarouselView.Listener {
             return out;
         }
         PackageManager pm = getPackageManager();
-        for (String pkg : pkgs.split("\n")) {
-            if (pkg.isEmpty()) {
+        for (String line : pkgs.split("\n")) {
+            if (line.isEmpty()) {
                 continue;
+            }
+            String pkg = line;
+            long ts = 0;
+            int bar = line.indexOf('|');
+            if (bar > 0) {
+                pkg = line.substring(0, bar);
+                try {
+                    ts = Long.parseLong(line.substring(bar + 1).trim());
+                } catch (NumberFormatException ignored) {
+                    ts = 0;
+                }
             }
             AppEntry e = entryFor(pm, pkg);
             if (e != null) {
                 e.fromTask = true;
                 e.cached = true;
+                e.lastActive = ts;
                 out.add(e);
             }
         }
@@ -1360,18 +1373,15 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         status.setTextSize(12);
         status.setSingleLine(true);
         status.setPadding(dp(7), 0, 0, 0);
+        // 卡片上只写时间（前台那张写 In foreground），不再区分 “Task / Background” 这种词
         if (e.resumed) {
             status.setText("In foreground");
             status.setTextColor(t.green);
-        } else if (e.cached) {
-            status.setText("Task");
-            status.setTextColor(t.sub);
-        } else if (e.fromTask) {
-            status.setText("Task · " + rel(e.lastActive));
+        } else if (e.lastActive > 0) {
+            status.setText(rel(e.lastActive));
             status.setTextColor(t.sub);
         } else {
-            status.setText("Background · " + rel(e.lastActive));
-            status.setTextColor(t.sub);
+            status.setVisibility(View.GONE);
         }
         statusRow.addView(status);
         LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
