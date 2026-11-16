@@ -84,6 +84,8 @@ public class CarouselView extends ViewGroup {
     private float swipeScale = 1f;
     private ValueAnimator swipeAnim;
     private boolean dismissAnimating;
+    /** 关掉一张卡片后的重排动画（剩下的卡片滑到新位置）。 */
+    private ValueAnimator reflowAnim;
 
     /** 长按判定：500ms 内没划动才算长按。 */
     private final Runnable longPressRunnable = new Runnable() {
@@ -149,6 +151,7 @@ public class CarouselView extends ViewGroup {
     public void setCards(List<View> cards, int initial) {
         stopAnim();
         cancelSwipeAnim();
+        cancelReflow();
         dismissAnimating = false;
         swipeIndex = -1;
         swipeDy = 0f;
@@ -163,6 +166,118 @@ public class CarouselView extends ViewGroup {
         lastSelected = getSelected();
         requestLayout();
         relayout();
+    }
+
+    /**
+     * 换一批卡片，并让剩下的卡片**从旧位置滑到新位置**。
+     *
+     * 关掉一个 app 时列表少一张，如果直接 setCards，剩下的卡片（包括原本在中间的）会
+     * 瞬间跳到新坐标，看起来像闪了一下。这里把重排前每张卡片的 x/y/缩放/透明度记下来，
+     * 重铺后先摆回旧位置，再用一个短动画推到新位置 —— 视觉上就是「抽走一张，其余补位」。
+     *
+     * @param removedIndex 被移除的那张在旧列表里的下标；< 0 时退化成普通 setCards
+     */
+    public void setCardsAnimated(List<View> cards, int initial, int removedIndex) {
+        int oldCount = getChildCount();
+        float[] ox = null, oy = null, os = null, oa = null;
+        if (removedIndex >= 0 && removedIndex < oldCount && oldCount > 1) {
+            ox = new float[oldCount];
+            oy = new float[oldCount];
+            os = new float[oldCount];
+            oa = new float[oldCount];
+            for (int i = 0; i < oldCount; i++) {
+                View c = getChildAt(i);
+                ox[i] = c.getX();
+                oy[i] = c.getY();
+                os[i] = c.getScaleX();
+                oa[i] = c.getAlpha();
+            }
+        }
+        setCards(cards, initial);
+        if (ox == null || cardW == 0 || getChildCount() == 0) {
+            return;
+        }
+
+        int n = getChildCount();
+        float[] fx = new float[n], fy = new float[n], fs = new float[n], fa = new float[n];
+        float[] sx = new float[n], sy = new float[n], ss = new float[n], sa = new float[n];
+        for (int i = 0; i < n; i++) {
+            View c = getChildAt(i);
+            fx[i] = c.getX();
+            fy[i] = c.getY();
+            fs[i] = c.getScaleX();
+            fa[i] = c.getAlpha();
+            // 新列表里第 i 张 = 旧列表里被删那张之后的元素整体前移一位
+            int oi = i < removedIndex ? i : i + 1;
+            if (oi >= 0 && oi < oldCount) {
+                sx[i] = ox[oi];
+                sy[i] = oy[oi];
+                ss[i] = os[oi];
+                sa[i] = oa[oi];
+            } else {
+                sx[i] = fx[i];
+                sy[i] = fy[i];
+                ss[i] = fs[i];
+                sa[i] = fa[i];
+            }
+            c.setX(sx[i]);
+            c.setY(sy[i]);
+            c.setScaleX(ss[i]);
+            c.setScaleY(ss[i]);
+            c.setAlpha(sa[i]);
+        }
+        invalidate();
+
+        // 位移超过一张卡片的，别让它横穿屏幕（比如 3 张变 2 张时左边那张要跑到右边）：
+        // 那种情况在原地淡出、到新位置再淡入，中间的空档由「滑到中间」的那张补上
+        final boolean[] far = new boolean[n];
+        for (int i = 0; i < n; i++) {
+            far[i] = Math.abs(fx[i] - sx[i]) > 1.2f * step;
+        }
+
+        reflowAnim = ValueAnimator.ofFloat(0f, 1f);
+        reflowAnim.setDuration(320);
+        reflowAnim.setInterpolator(ease);
+        reflowAnim.addUpdateListener(a -> {
+            float f = (Float) a.getAnimatedValue();
+            for (int i = 0; i < getChildCount(); i++) {
+                View c = getChildAt(i);
+                if (far[i]) {
+                    if (f < 0.5f) {
+                        // 前半段：留在旧位置淡出
+                        c.setX(sx[i]);
+                        c.setY(sy[i]);
+                        c.setScaleX(ss[i]);
+                        c.setScaleY(ss[i]);
+                        c.setAlpha(sa[i] * (1f - f / 0.5f));
+                    } else {
+                        // 后半段：直接出现在新位置淡入
+                        c.setX(fx[i]);
+                        c.setY(fy[i]);
+                        c.setScaleX(fs[i]);
+                        c.setScaleY(fs[i]);
+                        c.setAlpha(fa[i] * ((f - 0.5f) / 0.5f));
+                    }
+                    continue;
+                }
+                c.setX(sx[i] + (fx[i] - sx[i]) * f);
+                c.setY(sy[i] + (fy[i] - sy[i]) * f);
+                float s = ss[i] + (fs[i] - ss[i]) * f;
+                c.setScaleX(s);
+                c.setScaleY(s);
+                c.setAlpha(sa[i] + (fa[i] - sa[i]) * f);
+            }
+            // 焦点环画在 dispatchDraw 里，要跟着刷新
+            invalidate();
+        });
+        reflowAnim.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                reflowAnim = null;
+                relayout();
+            }
+        });
+        reflowAnim.start();
     }
 
     /** 是否有卡片正在做上滑退场（此时别重铺卡片，否则动画会被抽走）。 */
@@ -268,6 +383,17 @@ public class CarouselView extends ViewGroup {
         if (swipeAnim != null) {
             ValueAnimator a = swipeAnim;
             swipeAnim = null;
+            a.removeAllListeners();
+            a.removeAllUpdateListeners();
+            a.cancel();
+        }
+    }
+
+    /** 结束／取消重排动画（立刻落到最终位置）。 */
+    private void cancelReflow() {
+        if (reflowAnim != null) {
+            ValueAnimator a = reflowAnim;
+            reflowAnim = null;
             a.removeAllListeners();
             a.removeAllUpdateListeners();
             a.cancel();
@@ -522,6 +648,7 @@ public class CarouselView extends ViewGroup {
                 }
                 stopAnim();
                 cancelSwipeAnim();
+                cancelReflow();
                 swipeIndex = -1;
                 swipeDy = 0f;
                 swipeAlpha = 1f;
@@ -688,6 +815,7 @@ public class CarouselView extends ViewGroup {
         removeCallbacks(longPressRunnable);
         recycleVelocity();
         cancelSwipeAnim();
+        cancelReflow();
         super.onDetachedFromWindow();
     }
 

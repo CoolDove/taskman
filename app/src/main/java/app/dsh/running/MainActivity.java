@@ -1140,7 +1140,8 @@ public class MainActivity extends Activity implements CarouselView.Listener {
             cards.add(buildCard(x));
         }
         int next = Math.min(index, Math.max(0, shown.size() - 1));
-        carousel.setCards(cards, next);
+        // 用带重排动画的版本：剩下的卡片从旧位置滑到新位置，不会「闪」一下跳过去
+        carousel.setCardsAnimated(cards, next, index);
 
         boolean empty = shown.isEmpty();
         carousel.setVisibility(empty ? View.INVISIBLE : View.VISIBLE);

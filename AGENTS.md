@@ -232,6 +232,11 @@ public TaskSnapshot getTaskSnapshot(int taskId, boolean isLowResolution) {
   退场动画期间新的触摸会被丢弃（`G_BLOCKED`），避免把卡片拽回来。
 - **X 键与上滑共用同一套动效**：`closeCurrent()` 调 `carousel.dismissCurrent()`，不再直接改列表。
   焦点环（`dispatchDraw`）的透明度跟随卡片 alpha，否则卡片淡出了环还留着。
+- **关闭后的重排动画**：`CarouselView.setCardsAnimated(cards, next, removedIndex)` —— 重铺前先记下
+  每张旧卡片的 x/y/缩放/透明度，重铺后按 `i < removed ? i : i + 1` 的映射把新卡片摆回旧位置，
+  再用 320ms ease-out 推到新位置（不这么做的话，关掉一张后剩下的卡片会瞬间跳一格）。
+  位移超过 1.2 张卡片的（3 张变 2 张时左边那张要跑到右边）**不横穿屏幕**，改成原地淡出、
+  到新位置再淡入，中间的空档由滑到中间的那张补上。
 
 ### 离开即关闭
 - `onPause` 里 `finishAndRemoveTask()`，不留最近任务卡片。
