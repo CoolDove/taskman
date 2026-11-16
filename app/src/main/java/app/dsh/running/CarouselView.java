@@ -88,6 +88,8 @@ public class CarouselView extends ViewGroup {
     private ValueAnimator reflowAnim;
     /** 重排进度 0..1：焦点环跟着淡入，避免「高亮」在删掉的瞬间跳到旁边那张身上。 */
     private float reflowAlpha = 1f;
+    /** 绘制顺序：离中心越远的越先画，居中那张最后画（压在上面）。 */
+    private int[] drawOrder;
 
     /** 长按判定：500ms 内没划动才算长按。 */
     private final Runnable longPressRunnable = new Runnable() {
@@ -115,6 +117,8 @@ public class CarouselView extends ViewGroup {
         glowPaint.setStyle(Paint.Style.STROKE);
         setClipChildren(true);
         setClickable(true);
+        // 允许自定义画序：让居中那张永远画在最上面，其它卡片从它后面穿过去
+        setChildrenDrawingOrderEnabled(true);
         // 别让系统画默认的灰白焦点蒙版：按键都在 Activity 层处理，不需要 View 焦点
         setFocusable(false);
         setFocusableInTouchMode(false);
@@ -243,11 +247,9 @@ public class CarouselView extends ViewGroup {
         if (n == 0 || fx.length < n) {
             return;
         }
-        // 位移超过一张卡片的，别让它横穿屏幕（比如剩下的数量跨过循环阈值时）：
-        // 在原地淡出、到新位置再淡入，中间的空档由「滑到中间」的那张补上
-        final boolean[] far = new boolean[n];
+        // 长距离位移的卡片会从居中那张后面穿过去：靠 getChildDrawingOrder 让它先画（压在下面），
+        // 所以这里不需要淡出淡入 —— 那样反而会闪
         for (int i = 0; i < n; i++) {
-            far[i] = Math.abs(fx[i] - sx[i]) > 1.2f * step;
             View c = getChildAt(i);
             c.setPivotX(cardW / 2f);
             c.setPivotY(cardH / 2f);
@@ -257,6 +259,7 @@ public class CarouselView extends ViewGroup {
             c.setScaleY(ss[i]);
             c.setAlpha(sa[i]);
         }
+        updateDrawOrder();
         // 焦点环从 0 淡入，否则「谁被高亮」会在删掉的瞬间突然跳到旁边那张身上
         reflowAlpha = 0f;
         invalidate();
@@ -270,22 +273,6 @@ public class CarouselView extends ViewGroup {
             reflowAlpha = Math.max(0f, Math.min(1f, (f - 0.55f) / 0.45f));
             for (int i = 0; i < getChildCount() && i < n; i++) {
                 View c = getChildAt(i);
-                if (far[i]) {
-                    if (f < 0.5f) {
-                        c.setX(sx[i]);
-                        c.setY(sy[i]);
-                        c.setScaleX(ss[i]);
-                        c.setScaleY(ss[i]);
-                        c.setAlpha(sa[i] * (1f - f / 0.5f));
-                    } else {
-                        c.setX(fx[i]);
-                        c.setY(fy[i]);
-                        c.setScaleX(fs[i]);
-                        c.setScaleY(fs[i]);
-                        c.setAlpha(fa[i] * ((f - 0.5f) / 0.5f));
-                    }
-                    continue;
-                }
                 c.setX(sx[i] + (fx[i] - sx[i]) * f);
                 c.setY(sy[i] + (fy[i] - sy[i]) * f);
                 float s = ss[i] + (fs[i] - ss[i]) * f;
@@ -531,10 +518,7 @@ public class CarouselView extends ViewGroup {
     private float distance(int i) {
         float d = i - offset;
         if (!loops()) {
-            // 只剩两张时不循环，默认会把「另一张」摆在右边；这里左右翻一下，
-            // 让它待在左边 —— 这样从 3 张关到 2 张时，左边那张原地不动，
-            // 只有右边那张滑到中间，不需要横穿屏幕（也就没有淡出淡入的闪动）
-            return count == 2 ? -d : d;
+            return d;
         }
         float half = count / 2f;
         while (d > half) {
@@ -625,10 +609,45 @@ public class CarouselView extends ViewGroup {
             c.setScaleY(s);
             c.setAlpha(a);
         }
+        updateDrawOrder();
         invalidate();
     }
 
     // ------------------------------------------------------------ 绘制
+
+    /** 按「离中心从远到近」重排绘制顺序，居中那张最后画（压在最上面）。 */
+    private void updateDrawOrder() {
+        int n = getChildCount();
+        if (n <= 1) {
+            drawOrder = null;
+            return;
+        }
+        if (drawOrder == null || drawOrder.length != n) {
+            drawOrder = new int[n];
+        }
+        for (int i = 0; i < n; i++) {
+            drawOrder[i] = i;
+        }
+        // 简单插入排序：卡片最多十来个，别为此引入 Comparator/装箱
+        for (int i = 1; i < n; i++) {
+            int v = drawOrder[i];
+            float dv = Math.abs(distance(v));
+            int j = i - 1;
+            while (j >= 0 && Math.abs(distance(drawOrder[j])) < dv) {
+                drawOrder[j + 1] = drawOrder[j];
+                j--;
+            }
+            drawOrder[j + 1] = v;
+        }
+    }
+
+    @Override
+    protected int getChildDrawingOrder(int childCount, int i) {
+        if (drawOrder == null || drawOrder.length != childCount) {
+            return i;
+        }
+        return drawOrder[i];
+    }
 
     @Override
     protected void dispatchDraw(Canvas canvas) {
@@ -830,13 +849,9 @@ public class CarouselView extends ViewGroup {
 
     /**
      * 触点方向对应的那张卡片下标。
-     * 两张卡片时不循环，且「另一张」固定在左边（见 {@link #distance}），所以左右点都是换到那一张。
      */
     private int neighborIndex(int dir) {
         int sel = getSelected();
-        if (count == 2) {
-            return 1 - sel;
-        }
         int i = sel + dir;
         if (loops()) {
             return wrap(i);

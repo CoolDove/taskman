@@ -240,9 +240,9 @@ public TaskSnapshot getTaskSnapshot(int taskId, boolean isLowResolution) {
   2. `force-stop` + `am stack remove` 是 binder + 两次 exec（100~300ms），**必须放后台线程**，
      否则退场动画结束后主线程被占住，画面静止 10 帧以上，看着像卡死。
   3. 焦点环跟着 reflow 淡入（`reflowAlpha = (f-0.55)/0.45`），不要一删就跳到旁边那张身上。
-- **两张卡片时不循环**：`distance()` 对 `count == 2` 取负，让「另一张」待在左边。这样从 3 张关到
-  2 张时左边那张原地不动、只有右边那张滑到中间；否则它会横穿屏幕和居中卡片叠在一起。
-  `neighborIndex()` 里对 2 张的情况特判成「换到另一张」，点按 / 长按判定也走它。
+- **卡片之间的遮挡关系**：`setChildrenDrawingOrderEnabled(true)` + `getChildDrawingOrder()` 按
+  「离中心越远越先画」排序，居中那张永远压在最上面。3 张关到 2 张时左边那张要跑到右边，
+  有了这个画序它是**从居中卡片后面穿过去**的，不需要淡出淡入（那样会闪），左右键方向也保持原样。
 - `reload()` 拿到的列表和当前一致时**不重建卡片**（`sameEntries()` 只比 pkg/taskId/resumed 等），
   重建会重新创建视图、打断正在跑的重排动画。
 
