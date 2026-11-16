@@ -2,6 +2,8 @@
 
 A tiny, controller-first "recent apps" card carousel for Android handhelds.
 
+![TaskMan with ARMSX2 in the middle, Firefox on the left and YouTube on the right](screenshot.png)
+
 ## Why
 
 Android's built-in recents screen is not comfortable with a gamepad. Closing an app or
