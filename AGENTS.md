@@ -176,10 +176,12 @@ adb shell ps -A | grep shizuku_server     # 有 shell 身份的 shizuku_server �
 ### 数据三态（MainActivity）
 - `MODE_TASKS`（Shizuku 已连）→ `dumpsys` 任务栈
 - `MODE_CONNECTING`（Shizuku 在但用户服务没连上）→ **只铺上次缓存，绝不拿 UsageStats 顶替**；
-  没有缓存就显示「正在连接…」
+  没有缓存就显示 “Connecting…”
 - `MODE_FALLBACK`（Shizuku 真不可用）→ UsageStats「仅前台/含后台」近似
 - 尽早绑定：`App.onCreate` 里 `TaskBridge.init()`，早于界面；`TaskBridge.setOnReady` 回调触发 reload。
-- 缓存：SharedPreferences `taskman/recent_pkgs`，存包名列表，卡片状态显示「任务」而非具体时间。
+- 缓存：SharedPreferences `taskman/recent_pkgs`，存包名列表，卡片状态显示 “Task” 而非具体时间。
+- 界面文字**一律英文**（应用不跟随系统语言，`rel()` 也是手写的 “just now / N min ago”，
+  别用 `DateUtils.getRelativeTimeSpanString()`，它会跟着系统 locale 变中文）。
 - 过滤：自己、桌面 launcher、`moe.shizuku.privileged.api`。
 
 ### 手柄 / 触摸

@@ -27,7 +27,6 @@ import android.os.Looper;
 import android.os.Process;
 import android.provider.Settings;
 import android.text.TextUtils;
-import android.text.format.DateUtils;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -222,7 +221,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
             android.widget.ScrollView sv = new android.widget.ScrollView(this);
             sv.setBackgroundColor(0xFF160B0B);
             TextView tv = new TextView(this);
-            tv.setText("启动出错了，把这段发给我：\n\n" + trace);
+            tv.setText("Startup error — please send me this:\n\n" + trace);
             tv.setTextColor(0xFFFFB4B4);
             tv.setTextSize(9);
             tv.setTypeface(Typeface.MONOSPACE);
@@ -344,9 +343,9 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         footer.setOrientation(LinearLayout.HORIZONTAL);
         footer.setGravity(Gravity.CENTER);
         footer.setPadding(0, dp(10), 0, dp(2));
-        footer.addView(keyHint("A", "打开"));
-        footer.addView(keyHint("X", "关闭"));
-        footer.addView(keyHint("START", "熄屏"));
+        footer.addView(keyHint("A", "Open"));
+        footer.addView(keyHint("X", "Close"));
+        footer.addView(keyHint("START", "Sleep"));
         footerBar = footer;
         content.addView(footer);
 
@@ -425,7 +424,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         box.setPadding(dp(24), dp(10), dp(24), dp(10));
 
         emptyTitle = new TextView(this);
-        emptyTitle.setText("无任务");
+        emptyTitle.setText("No tasks");
         emptyTitle.setTextColor(t.sub);
         emptyTitle.setTextSize(16);
         emptyTitle.setGravity(Gravity.CENTER);
@@ -441,7 +440,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         box.addView(emptySub, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        permBtn = pill("去开启使用情况访问", t.ringA, Theme.alphaOf(t.ringA, 0x1F), 12, 16, 8);
+        permBtn = pill("Grant usage access", t.ringA, Theme.alphaOf(t.ringA, 0x1F), 12, 16, 8);
         permBtn.setVisibility(View.GONE);
         permBtn.setOnClickListener(v -> openUsageAccess());
         LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
@@ -449,7 +448,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         plp.topMargin = dp(14);
         box.addView(permBtn, plp);
 
-        modeBtn = pill("显示后台应用 (Y)", t.text, t.card, 12, 16, 8);
+        modeBtn = pill("Show background apps (Y)", t.text, t.card, 12, 16, 8);
         modeBtn.setVisibility(View.GONE);
         modeBtn.setOnClickListener(v -> toggleMode());
         LinearLayout.LayoutParams mlp2 = new LinearLayout.LayoutParams(
@@ -887,9 +886,9 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         }
         shizukuHint.setVisibility(View.VISIBLE);
         if (isShizukuInstalled()) {
-            shizukuHintText.setText("Shizuku 未运行 · 点此打开");
+            shizukuHintText.setText("Shizuku is not running · tap to open");
         } else {
-            shizukuHintText.setText("未安装 Shizuku · 任务列表不可用");
+            shizukuHintText.setText("Shizuku not installed · task list unavailable");
         }
     }
 
@@ -918,10 +917,10 @@ public class MainActivity extends Activity implements CarouselView.Listener {
                 i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 startActivity(i);
             } else {
-                toast("没有找到 Shizuku");
+                toast("Shizuku not found");
             }
         } catch (Throwable t) {
-            toast("打不开 Shizuku");
+            toast("Can't open Shizuku");
         }
     }
 
@@ -931,15 +930,15 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         modeBtn.setVisibility(View.GONE);
         emptySub.setVisibility(View.GONE);
         if (mode == MODE_CONNECTING) {
-            emptyTitle.setText("正在连接…");
+            emptyTitle.setText("Connecting…");
             emptyTitle.setTextColor(t.sub);
             emptyTitle.setTextSize(16);
         } else if (mode == MODE_FALLBACK && !granted) {
-            emptyTitle.setText("需要「使用情况访问」权限");
+            emptyTitle.setText("Usage access required");
             emptyTitle.setTextColor(t.text);
             emptyTitle.setTextSize(15);
         } else {
-            emptyTitle.setText("无任务");
+            emptyTitle.setText("No tasks");
             emptyTitle.setTextColor(t.sub);
             emptyTitle.setTextSize(16);
         }
@@ -951,7 +950,8 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         }
         boolean empty = shown.isEmpty();
         countView.setVisibility(empty ? View.GONE : View.VISIBLE);
-        countView.setText(empty ? "" : shown.size() + " 个应用");
+        int n = shown.size();
+        countView.setText(empty ? "" : n == 1 ? "1 app" : n + " apps");
     }
 
     private boolean isForeground(AppEntry e) {
@@ -1076,14 +1076,14 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         AppEntry e = shown.get(index);
         Intent i = getPackageManager().getLaunchIntentForPackage(e.pkg);
         if (i == null) {
-            toast("打不开 " + e.label);
+            toast("Can't open " + e.label);
             return;
         }
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
         try {
             startActivity(i);
         } catch (Exception ex) {
-            toast("打不开 " + e.label);
+            toast("Can't open " + e.label);
         }
     }
 
@@ -1132,7 +1132,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         }
         updateHeader();
         updateDots();
-        toast((ok ? "已结束 · " : "结束失败 · ") + e.label);
+        toast((ok ? "Closed · " : "Close failed · ") + e.label);
         // 稍后重新读一次任务栈，保证列表和系统一致
         ui.postDelayed(this::reload, 800);
     }
@@ -1140,7 +1140,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
     private void toggleMode() {
         showBackground = !showBackground;
         buildCards();
-        toast(showBackground ? "显示后台应用" : "只显示前台应用");
+        toast(showBackground ? "Showing background apps" : "Showing foreground only");
     }
 
     /**
@@ -1161,7 +1161,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         } catch (InterruptedException ignored) {
         }
         if (!ok[0]) {
-            toast("熄屏需要先连上 Shizuku");
+            toast("Connect Shizuku first to turn the screen off");
             return;
         }
         try {
@@ -1174,7 +1174,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         try {
             startActivity(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS));
         } catch (ActivityNotFoundException ignored) {
-            toast("请到 设置 → 应用 → 特殊权限 里开启");
+            toast("Enable it in Settings → Apps → Special access");
         }
     }
 
@@ -1186,7 +1186,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
                     Uri.parse("package:" + pkg))
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         } catch (ActivityNotFoundException ignored) {
-            toast("打不开系统设置");
+            toast("Can't open Settings");
         }
     }
 
@@ -1361,16 +1361,16 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         status.setSingleLine(true);
         status.setPadding(dp(7), 0, 0, 0);
         if (e.resumed) {
-            status.setText("前台运行");
+            status.setText("In foreground");
             status.setTextColor(t.green);
         } else if (e.cached) {
-            status.setText("任务");
+            status.setText("Task");
             status.setTextColor(t.sub);
         } else if (e.fromTask) {
-            status.setText("任务 · " + rel(e.lastActive));
+            status.setText("Task · " + rel(e.lastActive));
             status.setTextColor(t.sub);
         } else {
-            status.setText("后台 · " + rel(e.lastActive));
+            status.setText("Background · " + rel(e.lastActive));
             status.setTextColor(t.sub);
         }
         statusRow.addView(status);
@@ -1383,13 +1383,22 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         return card;
     }
 
+    /** Relative time in English (the UI does not follow the system locale). */
     private String rel(long ts) {
-        long delta = System.currentTimeMillis() - ts;
-        if (delta < 60_000L) {
-            return "刚刚";
+        long delta = Math.max(0L, System.currentTimeMillis() - ts);
+        if (delta < 45_000L) {
+            return "just now";
         }
-        return DateUtils.getRelativeTimeSpanString(ts, System.currentTimeMillis(),
-                DateUtils.MINUTE_IN_MILLIS).toString();
+        long min = delta / 60_000L;
+        if (min < 60) {
+            return min + " min ago";
+        }
+        long hours = min / 60;
+        if (hours < 24) {
+            return hours + (hours == 1 ? " hour ago" : " hours ago");
+        }
+        long days = hours / 24;
+        return days + (days == 1 ? " day ago" : " days ago");
     }
 
     // ------------------------------------------------------------- 工具
