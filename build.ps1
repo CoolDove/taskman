@@ -72,21 +72,58 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "zipalign failed" }
 
     Write-Host "==> 签名"
-    $ks = "$root\debug.keystore"
-    if (-not (Test-Path $ks)) {
-        # 注意：换密钥会导致无法覆盖安装，必须先从原构建机拷来
-        & keytool -genkeypair -keystore $ks -storepass android -keypass android `
-            -alias debug -keyalg RSA -keysize 2048 -validity 10000 `
-            -dname "CN=DSH Debug,O=DSH,C=CN"
+
+    # 正式签名：DOVE_ANDROID_KEYSTORE 指向 release keystore（tools\make-keystore.ps1 生成），
+    # 密码取 DOVE_KEYSTORE_PASS，没设就读 ~\.android-keys\keystore.properties。
+    # 两者都没有才退回仓库里的 debug.keystore —— 那只是本地调试用，不能发布。
+    $ksPath = $env:DOVE_ANDROID_KEYSTORE
+    $ksPass = $env:DOVE_KEYSTORE_PASS
+    $ksAlias = $env:DOVE_KEY_ALIAS
+    if (-not $ksPath) {
+        $props = Join-Path $env:USERPROFILE ".android-keys\keystore.properties"
+        if (Test-Path $props) {
+            Get-Content $props -Encoding ASCII | ForEach-Object {
+                if ($_ -match '^\s*(#|$)') { return }
+                $kv = $_.Split('=', 2)
+                if ($kv.Count -lt 2) { return }
+                $k = $kv[0].Trim(); $v = $kv[1].Trim()
+                if ($k -eq 'storeFile') { $ksPath = $v }
+                elseif ($k -eq 'storePassword' -and -not $ksPass) { $ksPass = $v }
+                elseif ($k -eq 'keyAlias' -and -not $ksAlias) { $ksAlias = $v }
+            }
+        }
     }
-    & "$btPath\apksigner.bat" sign --ks $ks --ks-pass pass:android --key-pass pass:android `
-        --out "$out\TaskMan-debug.apk" "$out\aligned.apk"
-    if ($LASTEXITCODE -ne 0) { throw "apksigner failed" }
-    & "$btPath\apksigner.bat" verify "$out\TaskMan-debug.apk" | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "apksigner verify failed" }
+
+    if ($ksPath -and (Test-Path $ksPath)) {
+        if (-not $ksAlias) { $ksAlias = "taskman" }
+        if (-not $ksPass) { throw "缺少 keystore 密码：设置 DOVE_KEYSTORE_PASS 或写进 keystore.properties" }
+        $apkName = "TaskMan-release.apk"
+        & "$btPath\apksigner.bat" sign --ks $ksPath --ks-key-alias $ksAlias `
+            --ks-pass "pass:$ksPass" --key-pass "pass:$ksPass" `
+            --out "$out\$apkName" "$out\aligned.apk"
+        if ($LASTEXITCODE -ne 0) { throw "apksigner failed（密码不对或 alias 不存在）" }
+        & "$btPath\apksigner.bat" verify "$out\$apkName" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "apksigner verify failed" }
+        Write-Host "    正式密钥：$ksPath (alias $ksAlias)"
+    } else {
+        Write-Host "    未找到 release keystore，退回 debug 签名（仅供本机调试，不要发布）" -ForegroundColor Yellow
+        $apkName = "TaskMan-debug.apk"
+        $ks = "$root\debug.keystore"
+        if (-not (Test-Path $ks)) {
+            # 注意：换密钥会导致无法覆盖安装，必须先从原构建机拷来
+            & keytool -genkeypair -keystore $ks -storepass android -keypass android `
+                -alias debug -keyalg RSA -keysize 2048 -validity 10000 `
+                -dname "CN=DSH Debug,O=DSH,C=CN"
+        }
+        & "$btPath\apksigner.bat" sign --ks $ks --ks-pass pass:android --key-pass pass:android `
+            --out "$out\$apkName" "$out\aligned.apk"
+        if ($LASTEXITCODE -ne 0) { throw "apksigner failed" }
+        & "$btPath\apksigner.bat" verify "$out\$apkName" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "apksigner verify failed" }
+    }
 
     Write-Host "==> 完成"
-    Get-Item "$out\TaskMan-debug.apk" | Select-Object Name, Length, LastWriteTime
+    Get-Item "$out\$apkName" | Select-Object Name, Length, LastWriteTime
 }
 finally {
     Pop-Location

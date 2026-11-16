@@ -32,6 +32,18 @@ stays **immersive**.
 As the name says, it's a key mapper. I use KeyMapper to map a button to launch TaskMan. TAht
 makes me totally forget the system built-in recent screen. Also for **immersiveness**.
 
+## Build
+
+```bash
+./build.sh                                   # Linux / aarch64 proot
+powershell -File build.ps1                   # Windows (needs Android build-tools, no Gradle)
+```
+
+The APK lands in `build/`. Signing is picked up from `DOVE_ANDROID_KEYSTORE`
+(+ `DOVE_KEYSTORE_PASS`, alias `DOVE_KEY_ALIAS`) and produces `TaskMan-release.apk`;
+without them it falls back to a local debug key and `TaskMan-debug.apk`, which is
+only meant for testing on your own device.
+
 ## ⚠️
 
 This software is entirely vibe coded with Deepseek AI. I personally know nothing about

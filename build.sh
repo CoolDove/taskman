@@ -59,15 +59,28 @@ fi
 "$ZIPALIGN" -f -p 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 
 echo "==> 签名"
-KS="$ROOT/debug.keystore"
-if [ ! -f "$KS" ]; then
-    keytool -genkeypair -keystore "$KS" -storepass android -keypass android \
-        -alias debug -keyalg RSA -keysize 2048 -validity 10000 \
-        -dname "CN=DSH Debug,O=DSH,C=CN" >/dev/null 2>&1
+# 正式签名：DOVE_ANDROID_KEYSTORE + DOVE_KEYSTORE_PASS（tools/make-keystore.ps1 生成）
+# 没设就退回仓库里的 debug.keystore —— 只适合本机调试，不要发布
+KS="${DOVE_ANDROID_KEYSTORE:-$ROOT/debug.keystore}"
+if [ "$KS" = "$ROOT/debug.keystore" ]; then
+    KSPASS="${DOVE_KEYSTORE_PASS:-android}"
+    KALIAS="${DOVE_KEY_ALIAS:-debug}"
+    APK=TaskMan-debug.apk
+    if [ ! -f "$KS" ]; then
+        keytool -genkeypair -keystore "$KS" -storepass android -keypass android \
+            -alias debug -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=DSH Debug,O=DSH,C=CN" >/dev/null 2>&1
+    fi
+else
+    KSPASS="${DOVE_KEYSTORE_PASS:?设置了 DOVE_ANDROID_KEYSTORE 就必须同时给 DOVE_KEYSTORE_PASS}"
+    KALIAS="${DOVE_KEY_ALIAS:-taskman}"
+    APK=TaskMan-release.apk
+    echo "    正式密钥：$KS (alias $KALIAS)"
 fi
-"$APKSIGNER" sign --ks "$KS" --ks-pass pass:android --key-pass pass:android \
-    --out "$OUT/TaskMan-debug.apk" "$OUT/aligned.apk"
-"$APKSIGNER" verify "$OUT/TaskMan-debug.apk" >/dev/null
+"$APKSIGNER" sign --ks "$KS" --ks-key-alias "$KALIAS" \
+    --ks-pass "pass:$KSPASS" --key-pass "pass:$KSPASS" \
+    --out "$OUT/$APK" "$OUT/aligned.apk"
+"$APKSIGNER" verify "$OUT/$APK" >/dev/null
 
 echo "==> 完成"
-ls -lh "$OUT/TaskMan-debug.apk"
+ls -lh "$OUT/$APK"

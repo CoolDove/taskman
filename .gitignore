@@ -5,3 +5,6 @@ local.properties
 *.iml
 .idea/
 *.keystore
+*.jks
+keystore.properties
+.android-keys/

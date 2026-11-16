@@ -291,9 +291,27 @@ adb shell input swipe 960 700 960 640 600
 ## 9. 发布
 
 - 版本号只改 `app/src/main/AndroidManifest.xml` 的 `versionCode` / `versionName`。
-- 产物固定叫 `build/TaskMan-debug.apk`；交付时复制到 `/sdcard/Download/DSH-Go/`
+- 产物名跟着签名走：**有 release keystore → `build/TaskMan-release.apk`**，
+  否则 `build/TaskMan-debug.apk`。交付时复制到 `/sdcard/Download/DSH-Go/`
   （注意：那是 **DSH 宿主手机**的存储，不是 Thor 的；Thor 通过 `adb install` 装）。
-- 包名不变 → 覆盖安装不会丢 Shizuku 授权。
+- 包名不变 → 覆盖安装不会丢 Shizuku 授权。**换签名密钥则一定会丢**（必须先卸载）。
+
+### 正式签名（release keystore）
+
+- 一次性生成（密码当场输，不回显）：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\make-keystore.ps1`
+  - 产物在 `%USERPROFILE%\.android-keys\taskman-release.jks`（alias `taskman`，RSA 4096 / SHA256withRSA，
+    validity 10000 天，DN `CN=CoolDove, O=CoolDove, C=CN`），**不在仓库里**（`.gitignore` 也挡了
+    `*.jks` / `keystore.properties` / `.android-keys/`）。
+  - 同时写 `%USERPROFILE%\.android-keys\keystore.properties`（含密码）并设置用户级环境变量
+    `DOVE_ANDROID_KEYSTORE`。
+- 构建脚本的取用顺序（`build.ps1` / `build.sh` 一致）：
+  1. `DOVE_ANDROID_KEYSTORE` 指向的 keystore；
+  2. `build.ps1` 在环境变量缺失时读 `%USERPROFILE%\.android-keys\keystore.properties`；
+  3. 都没有 → 退回仓库里的 `debug.keystore`（只许本机调试，**不要发布**）。
+  密码：`DOVE_KEYSTORE_PASS`，alias：`DOVE_KEY_ALIAS`（默认 `taskman`）。
+- release 包一旦发出去，**这个 keystore + 密码就是唯一升级路径**：丢了只能换包名重来。
+  `make-keystore.ps1` 会打印 SHA-256 指纹，发版时记下来，以后能核对签名是否为同一把。
+- 用 `apksigner verify --print-certs` 自查：debug 包是 `CN=DSH Debug`，正式包应是 `CN=CoolDove`。
 
 ## 10. 未做 / 已知限制
 
