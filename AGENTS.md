@@ -10,7 +10,7 @@ A 打开、X 关闭、Y 切换显示范围、START 熄屏退出。列表内容**
 Shizuku 拿到真实任务栈（普通应用拿不到，见 §5）。
 
 - 应用名：TaskMan　包名：`app.dsh.running`（包名不要改，改了就丢 Shizuku 授权）
-- 版本：2.0（versionCode 20），minSdk 23 / targetSdk 34
+- 版本：2.1（versionCode 21），minSdk 23 / targetSdk 34
 - 验证设备：AYN Thor（`kalama`，Android 13，1920×1080 横屏掌机，内置 Odin Controller + Xbox 手柄）
 - 构建/运行环境：aarch64 的 Ubuntu proot（DSH App 内），file sandbox 不可用，bash 一律
   `sandbox_permissions: danger-full-access`（参考 `~/.dsh/AGENTS.md`）
@@ -51,6 +51,9 @@ RunningApps/
 - 没有 `zip` 命令时，build.sh 用 `python3 zipfile` 把 `classes.dex` 追加进 APK。
 - `resources.arsc` 必须保持 stored + 4 字节对齐（`zipalign -f -p 4`），否则 Android 11+ 拒装。
 - 图标是 `tools/make_icon.py` 用纯 zlib 手写 PNG 生成的（没有 Pillow），改图标重跑它即可。
+  它一次产出三份：`ic_launcher.png`（传统整图，squircle 自带圆角，兜底 API 23~25）、
+  `ic_launcher_background.png`（满铺渐变）、`ic_launcher_foreground.png`（只有卡片层，
+  整体缩到 0.82 倍塞进 72dp 安全区），后两者由 `res/mipmap-anydpi-v26/ic_launcher.xml` 组合成自适应图标。
 
 ### Windows 侧构建（`build.ps1`）
 
@@ -186,7 +189,18 @@ adb shell ps -A | grep shizuku_server     # 有 shell 身份的 shizuku_server �
   以 shell 身份 `input keyevent 223`（`KEYCODE_SLEEP`，比 26 的电源键稳，只关不唤醒）。
   注入失败（用户服务没连上）时**不假装成功**：弹「熄屏需要先连上 Shizuku」并留在界面。
   熄屏必须在 `finishAndRemoveTask()` 之前发出，否则进程被回收、binder 事务会丢。
-- 触摸：滑动吸附、点中间打开、点两侧滑过去、长按进系统应用详情。
+- 触摸：左右滑动跟手 + 甩动速度吸附（`snap()`：位移 > 0.30 张或速度 > 640dp/s 就翻页）；
+  点中间打开、点两侧滑过去、长按进系统应用详情。
+  长按的 `Intent` 必须带 `FLAG_ACTIVITY_NEW_TASK`，否则设置页会落在 TaskMan 的任务里，
+  被 `finishAndRemoveTask()` 一起带走（现象：设置页闪一下就回到桌面/上一个应用）。
+- **手势全部在 `CarouselView` 里判定**，`onInterceptTouchEvent` 对 `ACTION_DOWN` 直接返回 true，
+  卡片子 View 不接触摸（否则子 View 拿到 DOWN 后父容器收不到 MOVE，横滑会被吃掉）。
+- **上滑关闭**：上滑超过 touch slop 后锁定居中卡片，跟手上移 + 缩小 + 变淡（过半后有阻尼），
+  松手时位移 > 0.22 张卡片高或上甩速度 > 650dp/s 就飞出去并淡出，否则弹回。
+  退场动画结束才回调 `Listener.onDismiss(index)` → `MainActivity.closeIndex()`（先 force-stop 再 remove task）。
+  退场动画期间新的触摸会被丢弃（`G_BLOCKED`），避免把卡片拽回来。
+- **X 键与上滑共用同一套动效**：`closeCurrent()` 调 `carousel.dismissCurrent()`，不再直接改列表。
+  焦点环（`dispatchDraw`）的透明度跟随卡片 alpha，否则卡片淡出了环还留着。
 
 ### 离开即关闭
 - `onPause` 里 `finishAndRemoveTask()`，不留最近任务卡片。
@@ -253,6 +267,15 @@ adb shell cmd uimode night no                       # 变回亮色
 cmd /c "adb exec-out screencap -p > shot.png"
 # 图太大读不进上下文时先缩一下（不需要 Pillow）
 ffmpeg -y -i shot.png -vf scale=1152:-1 -q:v 4 shot.jpg
+
+# 6) 触屏：横滑翻页 / 上滑关闭（1920x1080 的坐标，别的分辨率按比例改）
+adb shell input swipe 1200 540 600 540 180        # 左滑 → 选中下一张（指示器前进）
+adb shell input swipe 600 540 1300 540 180        # 右滑 → 回上一张
+adb shell input swipe 960 800 960 300 260         # 上滑 → 卡片飞出，应用被结束
+adb shell pidof <pkg>                             # 应为空
+adb shell dumpsys activity recents | grep -c <pkg>   # 应为 0
+# 慢速小幅上滑（滑不到位）应弹回，不关闭：
+adb shell input swipe 960 700 960 640 600
 ```
 
 排查按键「没反应」时的两个陷阱：

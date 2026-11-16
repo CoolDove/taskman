@@ -56,7 +56,8 @@ import rikka.shizuku.Shizuku;
  * 横屏卡片轮播版：中间卡片永远居中并高亮，左右各露出半张。
  *
  * 手柄：← → 切换　A 打开　X 关闭　Y 切换「只显示前台 / 显示后台」　START 熄屏并退出
- * 触屏：滑动切换，点中间卡片打开，点两侧卡片滑过去。
+ * 触屏：左右滑动切换，上滑关闭当前应用（和 X 键同一套退场动效），
+ *       点中间卡片打开，点两侧滑过去，长按进应用详情。
  */
 public class MainActivity extends Activity implements CarouselView.Listener {
 
@@ -539,6 +540,11 @@ public class MainActivity extends Activity implements CarouselView.Listener {
             final Throwable fail = error;
             ui.post(() -> {
                 loading = false;
+                if (carousel != null && carousel.isDismissing()) {
+                    // 退场动画只有 200ms 左右：等它收尾再重铺，避免把正在飞出去的卡片抽走
+                    ui.postDelayed(this::reload, 180);
+                    return;
+                }
                 if (fail != null) {
                     showCrash(fail);
                     return;
@@ -1082,7 +1088,14 @@ public class MainActivity extends Activity implements CarouselView.Listener {
     }
 
     private void closeCurrent() {
-        int index = carousel.getSelected();
+        // 「上滑关闭」和 X 键共用同一套退场动效：先滑出去淡出，动画结束后再真正结束应用
+        if (carousel == null || !carousel.dismissCurrent()) {
+            return;
+        }
+    }
+
+    /** 卡片上滑 / 退场动画结束后真正结束应用。 */
+    private void closeIndex(int index) {
         if (index < 0 || index >= shown.size()) {
             return;
         }
@@ -1118,6 +1131,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
             updateEmpty();
         }
         updateHeader();
+        updateDots();
         toast((ok ? "已结束 · " : "结束失败 · ") + e.label);
         // 稍后重新读一次任务栈，保证列表和系统一致
         ui.postDelayed(this::reload, 800);
@@ -1166,8 +1180,11 @@ public class MainActivity extends Activity implements CarouselView.Listener {
 
     private void openAppInfo(String pkg) {
         try {
+            // NEW_TASK：系统设置要落在自己的任务里，否则会和 TaskMan 共用任务，
+            // 离开时 finishAndRemoveTask() 会把设置页一起带走
             startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    Uri.parse("package:" + pkg)));
+                    Uri.parse("package:" + pkg))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         } catch (ActivityNotFoundException ignored) {
             toast("打不开系统设置");
         }
@@ -1254,6 +1271,20 @@ public class MainActivity extends Activity implements CarouselView.Listener {
     @Override
     public void onActivate(int index) {
         openApp(index);
+    }
+
+    /** 上滑关闭：CarouselView 的退场动画播完后回调，这里才是真正的 force-stop / remove task。 */
+    @Override
+    public void onDismiss(int index) {
+        closeIndex(index);
+    }
+
+    @Override
+    public void onLongPress(int index) {
+        if (index < 0 || index >= shown.size()) {
+            return;
+        }
+        openAppInfo(shown.get(index).pkg);
     }
 
     // ------------------------------------------------------------- 卡片
@@ -1348,10 +1379,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         slp.topMargin = dp(12);
         card.addView(statusRow, slp);
 
-        card.setOnLongClickListener(v -> {
-            openAppInfo(e.pkg);
-            return true;
-        });
+        // 长按由 CarouselView 统一识别（卡片自身不接手势），这里不再挂 listener
         return card;
     }
 
