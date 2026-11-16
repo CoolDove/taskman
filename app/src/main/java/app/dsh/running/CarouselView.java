@@ -34,16 +34,16 @@ public class CarouselView extends ViewGroup {
 
     private static final float CARD_RATIO = 0.42f;   // 卡片宽 / 屏宽
     private static final float SCALE_MIN = 0.86f;   // 侧边卡片的缩放
-    private static final float ALPHA_MIN = 0.42f;   // 侧边卡片的透明度
 
     private final PathInterpolator ease = new PathInterpolator(0.2f, 0f, 0f, 1f);
     private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint glowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint fadePaint = new Paint();
     private final RectF rect = new RectF();
-    private LinearGradient fadeLeft;
-    private LinearGradient fadeRight;
-    private int fadeW;
+    private Theme theme;
+
+    /** 外发光三层：(描边宽度dp, 不透明度0..255)，从外到内。 */
+    private static final float[] GLOW_WIDTH = {16f, 10f, 5f};
+    private static final int[] GLOW_ALPHA = {0x22, 0x38, 0x55};
 
     private int cardW;
     private int cardH;
@@ -65,11 +65,8 @@ public class CarouselView extends ViewGroup {
     public CarouselView(Context context, AttributeSet attrs) {
         super(context, attrs);
         ringPaint.setStyle(Paint.Style.STROKE);
-        ringPaint.setStrokeWidth(dp(2.5f));
-        ringPaint.setColor(0xFF3DDC84);
+        ringPaint.setStrokeWidth(dp(3f));
         glowPaint.setStyle(Paint.Style.STROKE);
-        glowPaint.setStrokeWidth(dp(11));
-        glowPaint.setColor(0x2E3DDC84);
         setClipChildren(true);
         setClickable(true);
         // 别让系统画默认的灰白焦点蒙版：按键都在 Activity 层处理，不需要 View 焦点
@@ -78,6 +75,16 @@ public class CarouselView extends ViewGroup {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             setDefaultFocusHighlightEnabled(false);
         }
+    }
+
+    /** 换主题：焦点环颜色跟着变。 */
+    public void setTheme(Theme t) {
+        theme = t;
+        invalidate();
+    }
+
+    private float alphaMin() {
+        return theme != null && !theme.dark ? 0.85f : 0.55f;
     }
 
     public void setListener(Listener l) {
@@ -214,11 +221,6 @@ public class CarouselView extends ViewGroup {
     @Override
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
-        fadeW = Math.round(w * 0.09f);
-        fadeLeft = new LinearGradient(0, 0, fadeW, 0,
-                0xFF0B0E13, 0x000B0E13, Shader.TileMode.CLAMP);
-        fadeRight = new LinearGradient(w, 0, w - fadeW, 0,
-                0xFF0B0E13, 0x000B0E13, Shader.TileMode.CLAMP);
     }
 
     @Override
@@ -265,7 +267,7 @@ public class CarouselView extends ViewGroup {
             c.setY(cy);
             c.setScaleX(s);
             c.setScaleY(s);
-            c.setAlpha(1f - (1f - ALPHA_MIN) * f);
+            c.setAlpha(1f - (1f - alphaMin()) * f);
         }
         invalidate();
     }
@@ -275,12 +277,6 @@ public class CarouselView extends ViewGroup {
     @Override
     protected void dispatchDraw(Canvas canvas) {
         super.dispatchDraw(canvas);
-        if (fadeLeft != null) {
-            fadePaint.setShader(fadeLeft);
-            canvas.drawRect(0, 0, fadeW, getHeight(), fadePaint);
-            fadePaint.setShader(fadeRight);
-            canvas.drawRect(getWidth() - fadeW, 0, getWidth(), getHeight(), fadePaint);
-        }
         if (count <= 0 || cardW == 0 || getChildCount() == 0) {
             return;
         }
@@ -294,9 +290,21 @@ public class CarouselView extends ViewGroup {
         float cy = c.getY() + cardH / 2f;
         float hw = cardW * s / 2f - dp(1);
         float hh = cardH * s / 2f - dp(1);
-        float radius = dp(20) * s;
+        float radius = dp(Theme.RADIUS_CARD) * s;
         rect.set(cx - hw, cy - hh, cx + hw, cy + hh);
-        canvas.drawRoundRect(rect, radius, radius, glowPaint);
+
+        // 焦点环：紫→粉渐变，外面套三层递减透明度的描边当发光
+        int a = theme == null ? 0xFF3DDC84 : theme.ringA;
+        int b = theme == null ? 0xFF3DDC84 : theme.ringB;
+        int glow = theme == null ? 0xFF3DDC84 : theme.ringGlow;
+        ringPaint.setShader(new LinearGradient(rect.left, rect.top, rect.right, rect.bottom,
+                a, b, Shader.TileMode.CLAMP));
+        glowPaint.setShader(null);
+        for (int i = 0; i < GLOW_WIDTH.length; i++) {
+            glowPaint.setStrokeWidth(dp(GLOW_WIDTH[i]) * s);
+            glowPaint.setColor(Theme.alphaOf(glow, GLOW_ALPHA[i]));
+            canvas.drawRoundRect(rect, radius, radius, glowPaint);
+        }
         canvas.drawRoundRect(rect, radius, radius, ringPaint);
     }
 

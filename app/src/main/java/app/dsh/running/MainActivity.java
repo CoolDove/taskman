@@ -13,6 +13,7 @@ import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.content.res.Configuration;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
@@ -62,20 +63,17 @@ public class MainActivity extends Activity implements CarouselView.Listener {
     private static final long WINDOW_MS = 6L * 60L * 60L * 1000L;   // 看多远的使用记录
     private static final long HOT_MS = 3L * 60L * 1000L;            // 刚退到后台多久内仍算前台
 
-    private static final int C_BG = 0xFF0B0E13;
-    private static final int C_CARD = 0xFF141A23;
-    private static final int C_CARD_STROKE = 0xFF232C3A;
-    private static final int C_TEXT = 0xFFEDF1F7;
-    private static final int C_SUB = 0xFF8B95A7;
-    private static final int C_GREEN = 0xFF3DDC84;
+    /** 当前配色，跟随系统亮/暗（onConfigurationChanged 里换一套并重建界面）。 */
+    private Theme t;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ArrayList<AppEntry> all = new ArrayList<>();
     private final ArrayList<AppEntry> shown = new ArrayList<>();
 
     private CarouselView carousel;
-    private LinearLayout headerBar;
-    private LinearLayout footerBar;
+    private View headerBar;
+    private View footerBar;
+    private LinearLayout dotsRow;
     private View emptyView;
     private TextView emptyTitle;
     private TextView emptySub;
@@ -137,6 +135,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         try {
+            t = Theme.of(this);
             setupWindow();
             launcherPkg = resolveLauncher();
             setContentView(buildUi());
@@ -147,6 +146,29 @@ public class MainActivity extends Activity implements CarouselView.Listener {
             ui.post(shizukuPoll);
         } catch (Throwable t) {
             showCrash(t);
+        }
+    }
+
+    /**
+     * 系统切换亮/暗色时重建界面。
+     *
+     * 不能用 recreate()：它会让 Activity 走 onPause，而 onPause 里是 finishAndRemoveTask，
+     * 界面会直接消失。所以 manifest 里接管 uiMode，原地重搭视图、保留选中位置。
+     */
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        try {
+            int keep = carousel == null ? 0 : carousel.getSelected();
+            t = Theme.of(this);
+            setContentView(buildUi());
+            hideBars();
+            buildCards();
+            if (carousel != null) {
+                carousel.select(Math.min(keep, Math.max(0, carousel.count() - 1)));
+            }
+        } catch (Throwable ex) {
+            showCrash(ex);
         }
     }
 
@@ -249,78 +271,48 @@ public class MainActivity extends Activity implements CarouselView.Listener {
     // ---------------------------------------------------------------- UI
 
     private View buildUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(C_BG);
-        root.setOnApplyWindowInsetsListener((v, insets) -> {
-            int l = 0, t = 0, r = 0, b = 0;
-            if (Build.VERSION.SDK_INT >= 30) {
-                android.graphics.Insets i = insets.getInsets(
-                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-                l = i.left;
-                t = i.top;
-                r = i.right;
-                b = i.bottom;
-            } else {
-                l = insets.getSystemWindowInsetLeft();
-                t = insets.getSystemWindowInsetTop();
-                r = insets.getSystemWindowInsetRight();
-                b = insets.getSystemWindowInsetBottom();
-            }
-            // 舞台必须满宽，否则左右 cutout 不等会把中间卡片挤偏
-            v.setPadding(0, t + dp(8), 0, b + dp(4));
-            if (headerBar != null) {
-                headerBar.setPadding(l + dp(24), dp(6), r + dp(24), 0);
-            }
-            if (footerBar != null) {
-                footerBar.setPadding(l + dp(24), dp(8), r + dp(24), dp(2));
-            }
-            return insets;
-        });
+        FrameLayout root = new FrameLayout(this);
 
-        // 顶部：标题 + 模式胶囊 + 数量
-        LinearLayout header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-        header.setGravity(Gravity.CENTER_VERTICAL);
+        // 背景：渐变 + 两团环境光
+        Backdrop backdrop = new Backdrop(this);
+        backdrop.setPalette(t.bgTop, t.bgBottom, t.glowA, t.glowB);
+        root.addView(backdrop, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        TextView title = new TextView(this);
-        title.setText("TaskMan");
-        title.setTextColor(C_TEXT);
-        title.setTextSize(18);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        header.addView(title);
+        // 大面板已去掉：渐变直接当背景，卡片浮在上面
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
 
-        View headSpacer = new View(this);
-        header.addView(headSpacer, new LinearLayout.LayoutParams(0, 1, 1f));
+        headerBar = buildHeader();
+        content.addView(headerBar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        countView = new TextView(this);
-        countView.setTextColor(C_SUB);
-        countView.setTextSize(12);
-        header.addView(countView);
-        headerBar = header;
-        root.addView(header);
-
-        // 中间：轮播
+        // 舞台必须满宽：左右各露半张卡片，靠屏幕边缘裁切（有 padding 的话会提前裁断）
         FrameLayout stage = new FrameLayout(this);
-        root.addView(stage, new LinearLayout.LayoutParams(
+        content.addView(stage, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         carousel = new CarouselView(this);
+        carousel.setTheme(t);
         carousel.setListener(this);
         stage.addView(carousel, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         banner = new TextView(this);
-        banner.setTextColor(C_TEXT);
+        banner.setTextColor(t.bannerText);
         banner.setTextSize(12);
-        banner.setPadding(dp(18), dp(9), dp(18), dp(9));
-        banner.setBackground(round(0xF01B222D, 20));
+        banner.setPadding(dp(20), dp(10), dp(20), dp(10));
+        GradientDrawable bbg = round(t.bannerBg, 22);
+        if ((t.bannerStroke >>> 24) != 0) {
+            bbg.setStroke(Math.max(1, dp(1)), t.bannerStroke);
+        }
+        banner.setBackground(bbg);
         banner.setAlpha(0f);
         banner.setVisibility(View.GONE);
         FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        blp.bottomMargin = dp(6);
+        blp.bottomMargin = dp(4);
         stage.addView(banner, blp);
 
         shizukuHint = buildShizukuHint();
@@ -328,7 +320,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         FrameLayout.LayoutParams hlp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        hlp.topMargin = dp(6);
+        hlp.topMargin = dp(4);
         stage.addView(shizukuHint, hlp);
 
         emptyView = buildEmpty();
@@ -337,20 +329,92 @@ public class MainActivity extends Activity implements CarouselView.Listener {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.CENTER));
 
-        // 底部：按键说明
+        // 卡片下方的位置指示器
+        dotsRow = new LinearLayout(this);
+        dotsRow.setOrientation(LinearLayout.HORIZONTAL);
+        dotsRow.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        dlp.topMargin = dp(2);
+        content.addView(dotsRow, dlp);
+
+        // 底部：按键胶囊
         LinearLayout footer = new LinearLayout(this);
         footer.setOrientation(LinearLayout.HORIZONTAL);
         footer.setGravity(Gravity.CENTER);
-        footer.setPadding(0, dp(8), 0, dp(2));
-        footer.addView(keyCap("A"));
-        footer.addView(hint("打开"));
-        footer.addView(keyCap("X"));
-        footer.addView(hint("关闭"));
-        footer.addView(keyCap("START"));
-        footer.addView(hint("熄屏"));
+        footer.setPadding(0, dp(10), 0, dp(2));
+        footer.addView(keyHint("A", "打开"));
+        footer.addView(keyHint("X", "关闭"));
+        footer.addView(keyHint("START", "熄屏"));
         footerBar = footer;
-        root.addView(footer);
+        content.addView(footer);
+
+        root.addView(content, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            int l = 0, top = 0, r = 0, b = 0;
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets i = insets.getInsets(
+                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                l = i.left;
+                top = i.top;
+                r = i.right;
+                b = i.bottom;
+            } else {
+                l = insets.getSystemWindowInsetLeft();
+                top = insets.getSystemWindowInsetTop();
+                r = insets.getSystemWindowInsetRight();
+                b = insets.getSystemWindowInsetBottom();
+            }
+            // 左右不对称的 cutout（右侧 216px）会把标题、页脚挤偏；舞台保持满宽不受影响
+            int side = dp(28) + Math.max(l, r);
+            content.setPadding(0, top + dp(8), 0, b + dp(12));
+            if (headerBar != null) {
+                headerBar.setPadding(side + dp(6), dp(2), side + dp(6), dp(2));
+            }
+            if (footerBar != null) {
+                footerBar.setPadding(side, dp(10), side, dp(2));
+            }
+            return insets;
+        });
         return root;
+    }
+
+    /** 顶部标题行：应用图标 + TaskMan，右侧数量。没有外框，直接压着渐变。 */
+    private View buildHeader() {
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(6), dp(2), dp(6), dp(2));
+
+        ImageView icon = new ImageView(this);
+        try {
+            icon.setImageDrawable(getPackageManager().getApplicationIcon(getPackageName()));
+        } catch (Throwable ignored) {
+        }
+        header.addView(icon, new LinearLayout.LayoutParams(dp(26), dp(26)));
+
+        TextView title = new TextView(this);
+        title.setText("TaskMan");
+        title.setTextColor(t.text);
+        title.setTextSize(17);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tlp.leftMargin = dp(10);
+        header.addView(title, tlp);
+
+        header.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+
+        countView = new TextView(this);
+        countView.setTextColor(t.sub);
+        countView.setTextSize(11);
+        countView.setPadding(dp(10), dp(4), dp(10), dp(4));
+        countView.setBackground(round(Theme.alphaOf(t.card, 0xE6), 11));
+        header.addView(countView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return header;
     }
 
     private View buildEmpty() {
@@ -361,14 +425,14 @@ public class MainActivity extends Activity implements CarouselView.Listener {
 
         emptyTitle = new TextView(this);
         emptyTitle.setText("无任务");
-        emptyTitle.setTextColor(C_SUB);
+        emptyTitle.setTextColor(t.sub);
         emptyTitle.setTextSize(16);
         emptyTitle.setGravity(Gravity.CENTER);
         box.addView(emptyTitle, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         emptySub = new TextView(this);
-        emptySub.setTextColor(C_SUB);
+        emptySub.setTextColor(t.sub);
         emptySub.setTextSize(11);
         emptySub.setGravity(Gravity.CENTER);
         emptySub.setPadding(0, dp(6), 0, 0);
@@ -376,7 +440,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         box.addView(emptySub, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        permBtn = pill("去开启使用情况访问", C_GREEN, 0x1F3DDC84, 12, 16, 8);
+        permBtn = pill("去开启使用情况访问", t.ringA, Theme.alphaOf(t.ringA, 0x1F), 12, 16, 8);
         permBtn.setVisibility(View.GONE);
         permBtn.setOnClickListener(v -> openUsageAccess());
         LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
@@ -384,7 +448,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         plp.topMargin = dp(14);
         box.addView(permBtn, plp);
 
-        modeBtn = pill("显示后台应用 (Y)", C_TEXT, 0xFF222A36, 12, 16, 8);
+        modeBtn = pill("显示后台应用 (Y)", t.text, t.card, 12, 16, 8);
         modeBtn.setVisibility(View.GONE);
         modeBtn.setOnClickListener(v -> toggleMode());
         LinearLayout.LayoutParams mlp2 = new LinearLayout.LayoutParams(
@@ -395,30 +459,42 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         return box;
     }
 
-    private TextView keyCap(String label) {
-        TextView v = new TextView(this);
-        v.setText(label);
-        v.setTextColor(C_TEXT);
-        v.setTextSize(10);
-        v.setTypeface(Typeface.MONOSPACE);
-        v.setGravity(Gravity.CENTER);
-        v.setMinWidth(dp(20));
-        v.setPadding(dp(6), dp(3), dp(6), dp(3));
-        v.setBackground(round(0xFF222A36, 6));
+    /** 底部按键胶囊：按键标记 + 说明，颜色跟随主题（暗色下是深色底，别留成白条）。 */
+    private View keyHint(String key, String label) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.HORIZONTAL);
+        box.setGravity(Gravity.CENTER_VERTICAL);
+        box.setPadding(dp(8), dp(6), dp(14), dp(6));
+        GradientDrawable bg = round(t.pillBg, 16);
+        if ((t.pillStroke >>> 24) != 0) {
+            bg.setStroke(Math.max(1, dp(1)), t.pillStroke);
+        }
+        box.setBackground(bg);
+
+        TextView k = new TextView(this);
+        k.setText(key);
+        k.setTextColor(t.pillKey);
+        k.setTextSize(9);
+        k.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        k.setGravity(Gravity.CENTER);
+        k.setMinWidth(dp(18));
+        k.setPadding(dp(5), dp(2), dp(5), dp(2));
+        k.setBackground(round(Theme.alphaOf(t.pillKey, t.dark ? 0x30 : 0x22), 9));
+        box.addView(k, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView l = new TextView(this);
+        l.setText(label);
+        l.setTextColor(t.pillText);
+        l.setTextSize(11);
+        l.setPadding(dp(7), 0, 0, 0);
+        box.addView(l);
+
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.leftMargin = dp(12);
-        v.setLayoutParams(lp);
-        return v;
-    }
-
-    private TextView hint(String text) {
-        TextView v = new TextView(this);
-        v.setText(text);
-        v.setTextColor(C_SUB);
-        v.setTextSize(11);
-        v.setPadding(dp(5), 0, 0, 0);
-        return v;
+        lp.leftMargin = dp(8);
+        box.setLayoutParams(lp);
+        return box;
     }
 
     // ------------------------------------------------------------- 数据
@@ -733,6 +809,40 @@ public class MainActivity extends Activity implements CarouselView.Listener {
             updateEmpty();
         }
         updateHeader();
+        updateDots();
+    }
+
+    /** 位置指示器：当前那张是长条，其余是小圆点；太多就退化成「3 / 12」。 */
+    private void updateDots() {
+        if (dotsRow == null) {
+            return;
+        }
+        dotsRow.removeAllViews();
+        int n = shown.size();
+        if (n <= 1) {
+            dotsRow.setVisibility(View.GONE);
+            return;
+        }
+        dotsRow.setVisibility(View.VISIBLE);
+        int sel = carousel == null ? 0 : carousel.getSelected();
+        if (n > 10) {
+            TextView tv = new TextView(this);
+            tv.setText((sel + 1) + " / " + n);
+            tv.setTextSize(10);
+            tv.setTextColor(t.sub);
+            dotsRow.addView(tv);
+            return;
+        }
+        for (int i = 0; i < n; i++) {
+            boolean on = i == sel;
+            View d = new View(this);
+            d.setBackground(round(on ? t.ringA : Theme.alphaOf(t.sub, 0x4D), 3));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    on ? dp(18) : dp(6), dp(6));
+            lp.leftMargin = dp(3);
+            lp.rightMargin = dp(3);
+            dotsRow.addView(d, lp);
+        }
     }
 
     private View buildShizukuHint() {
@@ -740,19 +850,19 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         box.setOrientation(LinearLayout.HORIZONTAL);
         box.setGravity(Gravity.CENTER_VERTICAL);
         box.setPadding(dp(16), dp(9), dp(16), dp(9));
-        GradientDrawable bg = round(0xF0241A17, 18);
-        bg.setStroke(Math.max(1, dp(1)), 0x66FF8A65);
+        GradientDrawable bg = round(t.warnBg, 18);
+        bg.setStroke(Math.max(1, dp(1)), t.warnStroke);
         box.setBackground(bg);
 
         View dot = new View(this);
         GradientDrawable dotBg = new GradientDrawable();
         dotBg.setShape(GradientDrawable.OVAL);
-        dotBg.setColor(0xFFFF8A65);
+        dotBg.setColor(t.warnDot);
         dot.setBackground(dotBg);
         box.addView(dot, new LinearLayout.LayoutParams(dp(7), dp(7)));
 
         shizukuHintText = new TextView(this);
-        shizukuHintText.setTextColor(0xFFFFC9B8);
+        shizukuHintText.setTextColor(t.warnText);
         shizukuHintText.setTextSize(12);
         shizukuHintText.setPadding(dp(9), 0, 0, 0);
         box.addView(shizukuHintText);
@@ -816,21 +926,26 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         emptySub.setVisibility(View.GONE);
         if (mode == MODE_CONNECTING) {
             emptyTitle.setText("正在连接…");
-            emptyTitle.setTextColor(C_SUB);
+            emptyTitle.setTextColor(t.sub);
             emptyTitle.setTextSize(16);
         } else if (mode == MODE_FALLBACK && !granted) {
             emptyTitle.setText("需要「使用情况访问」权限");
-            emptyTitle.setTextColor(C_TEXT);
+            emptyTitle.setTextColor(t.text);
             emptyTitle.setTextSize(15);
         } else {
             emptyTitle.setText("无任务");
-            emptyTitle.setTextColor(C_SUB);
+            emptyTitle.setTextColor(t.sub);
             emptyTitle.setTextSize(16);
         }
     }
 
     private void updateHeader() {
-        countView.setText(shown.size() == 0 ? "" : shown.size() + " 个应用");
+        if (countView == null) {
+            return;
+        }
+        boolean empty = shown.isEmpty();
+        countView.setVisibility(empty ? View.GONE : View.VISIBLE);
+        countView.setText(empty ? "" : shown.size() + " 个应用");
     }
 
     private boolean isForeground(AppEntry e) {
@@ -1132,7 +1247,8 @@ public class MainActivity extends Activity implements CarouselView.Listener {
 
     @Override
     public void onSelected(int index) {
-        // 选中变化时不需要重绘整页，卡片高亮由 CarouselView 自己画
+        // 卡片高亮由 CarouselView 自己画，这里只更新底部的位置指示器
+        updateDots();
     }
 
     @Override
@@ -1145,41 +1261,58 @@ public class MainActivity extends Activity implements CarouselView.Listener {
     private View buildCard(final AppEntry e) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(24), dp(20), dp(24), dp(20));
-        GradientDrawable bg = round(C_CARD, 20);
-        bg.setStroke(Math.max(1, dp(1)), C_CARD_STROKE);
+        card.setPadding(dp(16), dp(16), dp(16), dp(15));
+        GradientDrawable bg = round(t.card, Theme.RADIUS_CARD);
+        bg.setStroke(Math.max(1, dp(1)), t.cardStroke);
         card.setBackground(bg);
         card.setFocusable(false);
         card.setFocusableInTouchMode(false);
         if (Build.VERSION.SDK_INT >= 26) {
             card.setDefaultFocusHighlightEnabled(false);
         }
+        // 卡片直接浮在渐变背景上，靠投影分层；暗色下投影很淡，所以卡片本身比背景亮一档
+        card.setElevation(t.dark ? dp(14) : dp(10));
+        if (Build.VERSION.SDK_INT >= 28) {
+            card.setOutlineAmbientShadowColor(t.shadow);
+            card.setOutlineSpotShadowColor(t.shadow);
+        }
 
-        card.addView(new View(this), new LinearLayout.LayoutParams(1, 0, 1f));
-
+        // 图标区：拿不到任务截图，就用大图标压在柔和渐变块上（对应设计稿里的缩略图位）
+        FrameLayout art = new FrameLayout(this);
+        GradientDrawable artBg = new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM, new int[]{t.tileTop, t.tileBottom});
+        artBg.setCornerRadius(dp(Theme.RADIUS_ART));
+        art.setBackground(artBg);
         ImageView icon = new ImageView(this);
         icon.setImageDrawable(e.icon);
-        card.addView(icon, new LinearLayout.LayoutParams(dp(68), dp(68)));
+        FrameLayout.LayoutParams ilp = new FrameLayout.LayoutParams(
+                dp(96), dp(96), Gravity.CENTER);
+        art.addView(icon, ilp);
+        card.addView(art, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         TextView name = new TextView(this);
         name.setText(e.label);
-        name.setTextColor(C_TEXT);
+        name.setTextColor(t.text);
         name.setTextSize(21);
         name.setSingleLine(true);
         name.setEllipsize(TextUtils.TruncateAt.END);
-        name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        name.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
         LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        nlp.topMargin = dp(18);
+        nlp.topMargin = dp(14);
         card.addView(name, nlp);
 
         TextView pkg = new TextView(this);
         pkg.setText(e.pkg);
-        pkg.setTextColor(0xFF6F7A8C);
+        pkg.setTextColor(t.pkg);
         pkg.setTextSize(10);
         pkg.setSingleLine(true);
         pkg.setEllipsize(TextUtils.TruncateAt.END);
-        card.addView(pkg);
+        LinearLayout.LayoutParams klp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        klp.topMargin = dp(2);
+        card.addView(pkg, klp);
 
         LinearLayout statusRow = new LinearLayout(this);
         statusRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -1188,7 +1321,7 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         View dot = new View(this);
         GradientDrawable dotBg = new GradientDrawable();
         dotBg.setShape(GradientDrawable.OVAL);
-        dotBg.setColor(e.resumed ? C_GREEN : 0xFF576273);
+        dotBg.setColor(e.resumed ? t.green : t.dotOff);
         dot.setBackground(dotBg);
         statusRow.addView(dot, new LinearLayout.LayoutParams(dp(7), dp(7)));
 
@@ -1198,24 +1331,22 @@ public class MainActivity extends Activity implements CarouselView.Listener {
         status.setPadding(dp(7), 0, 0, 0);
         if (e.resumed) {
             status.setText("前台运行");
-            status.setTextColor(C_GREEN);
+            status.setTextColor(t.green);
         } else if (e.cached) {
             status.setText("任务");
-            status.setTextColor(C_SUB);
+            status.setTextColor(t.sub);
         } else if (e.fromTask) {
             status.setText("任务 · " + rel(e.lastActive));
-            status.setTextColor(C_SUB);
+            status.setTextColor(t.sub);
         } else {
             status.setText("后台 · " + rel(e.lastActive));
-            status.setTextColor(C_SUB);
+            status.setTextColor(t.sub);
         }
         statusRow.addView(status);
         LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        slp.topMargin = dp(18);
+        slp.topMargin = dp(12);
         card.addView(statusRow, slp);
-
-        card.addView(new View(this), new LinearLayout.LayoutParams(1, 0, 1f));
 
         card.setOnLongClickListener(v -> {
             openAppInfo(e.pkg);

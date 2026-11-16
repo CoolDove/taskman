@@ -10,7 +10,7 @@ A 打开、X 关闭、Y 切换显示范围、START 熄屏退出。列表内容**
 Shizuku 拿到真实任务栈（普通应用拿不到，见 §5）。
 
 - 应用名：TaskMan　包名：`app.dsh.running`（包名不要改，改了就丢 Shizuku 授权）
-- 版本：1.9（versionCode 19），minSdk 23 / targetSdk 34
+- 版本：2.0（versionCode 20），minSdk 23 / targetSdk 34
 - 验证设备：AYN Thor（`kalama`，Android 13，1920×1080 横屏掌机，内置 Odin Controller + Xbox 手柄）
 - 构建/运行环境：aarch64 的 Ubuntu proot（DSH App 内），file sandbox 不可用，bash 一律
   `sandbox_permissions: danger-full-access`（参考 `~/.dsh/AGENTS.md`）
@@ -29,7 +29,9 @@ RunningApps/
 ├── app/src/main/java/app/dsh/running/
 │   ├── App.java                  # Application：装崩溃日志 + 最早初始化 TaskBridge
 │   ├── MainActivity.java         # 界面、三态数据、手柄按键、任务栈解析、缓存
-│   ├── CarouselView.java         # 居中卡片轮播 + easing 滚动 + 聚焦描边 + 边缘渐隐
+│   ├── CarouselView.java         # 居中卡片轮播 + easing 滚动 + 渐变焦点环 + 边缘渐隐
+│   ├── Theme.java                # 亮/暗两套配色（跟随系统 uiMode）
+│   ├── Backdrop.java             # 背景：竖向渐变 + 两团环境光
 │   ├── TaskBridge.java           # Shizuku 用户服务的连接管理（早绑定 / 重连 / dump / stop / sleep）
 │   ├── TaskUserService.java      # 跑在 shell 进程里的服务：dumpsys / force-stop / stack remove / 熄屏
 │   └── Diag.java                 # 崩溃时把堆栈写到 下载/DSH-Go/logs/
@@ -151,6 +153,14 @@ adb shell ps -A | grep shizuku_server     # 有 shell 身份的 shizuku_server �
 7. **启动先闪一版错误列表**：先渲染 UsageStats 兜底、1~2 秒后才换成任务栈。修法见 §7「三态加载」。
 8. **崩溃排查没有 adb 时**：`Diag` 在崩溃时把堆栈经 MediaStore 写到「下载/DSH-Go/logs/」；
    `Android/data/<pkg>` 在 proot 里读不到，别打那里的主意。`onCreate` 里出错会显示红底错误页。
+9. **两侧卡片在屏幕内被「切断」**：`CarouselView` 的 `clipChildren` 在它自己边界裁切，
+   而它必须是满宽的，两侧卡片正好各露半张、被**屏幕边缘**切。所以纵向容器的水平 padding 必须为 0，
+   header / footer 各自单独加左右 padding（用 `max(l,r)` 抵消右侧 216px 的 cutout）。
+10. **切夜间模式后「Quickstep 屡次停止运行」**：`com.android.launcher3` 的 `RecentsActivity` 在
+   配置变更重建时重复注销 receiver（`IllegalArgumentException: Receiver not registered`），
+   这是系统桌面的 bug，`cmd uimode night yes/no` 每次都可能崩一次，与 TaskMan 无关。
+11. **PowerShell 里截图全是雪花/花屏**：`adb exec-out screencap -p > x.png` 会被 ps 按文本转码，
+   PNG 直接损坏。必须 `cmd /c "adb ... > x.png"`。
 
 ## 7. 关键实现约定
 
@@ -184,8 +194,26 @@ adb shell ps -A | grep shizuku_server     # 有 shell 身份的 shizuku_server �
   （`TaskBridge.permissionDialogShowing()`）。
 
 ### 界面
+- 结构（console 风格：渐变背景 + 悬浮卡片）：
+  `Backdrop`（渐变 + 左上紫/右下蓝环境光）直接当背景，**没有外面的大框**：
+  顶部一行淡标题（应用图标 + TaskMan，右侧数量胶囊）→ 中间轮播 → 位置指示器 → 底部按键胶囊。
+- 卡片靠**投影**和背景分层：圆角 24dp、elevation（暗 14dp / 亮 10dp），
+  API 28+ 用 `setOutlineAmbientShadowColor` / `SpotShadowColor` 调投影色。
+  上半是「图标压渐变块」的缩略图位（拿不到任务截图），下面是名称 / 包名 / 状态点。
+- 居中那张由 `CarouselView.dispatchDraw` 画紫→粉渐变描边 + 三层递减透明度的外发光。
+- 底部 `A 打开` / `X 关闭` / `START 熄屏` 是胶囊，颜色跟着主题走（亮色白胶囊 / 暗色深胶囊），
+  按键标记用 accent 色的小圆角块；应用内提示条同理（亮色深底、暗色浅底）。
+- 位置指示器：当前那张是长条，其余是小圆点；超过 10 个退化成「3 / 12」。
 - 空列表只显示「无任务」（没授权时才出现「使用情况访问」按钮）。
-- 底部只留 `A 打开` / `X 关闭` / `START 熄屏`；顶部只有 TaskMan + 右侧应用数量，没有模式胶囊。
+
+### 亮/暗主题
+- 所有颜色都在 `Theme.of(context)` 里，按 `Configuration.uiMode & UI_MODE_NIGHT_MASK` 选一套；
+  **不要在别处写死色值**（`C_*` 常量已经删掉了）。
+- 跟随系统切换：manifest 里接管 `uiMode`，`onConfigurationChanged` 里 `t = Theme.of(this)` +
+  `setContentView(buildUi())` + `buildCards()` 原地重建，并保留当前选中位置。
+  **不能用 `recreate()`**：它会走 `onPause`，而 onPause 里是 `finishAndRemoveTask`，界面会直接消失。
+- `CarouselView.setTheme()` 同步焦点环颜色；两侧不再画「渐隐遮罩」——背景是渐变，
+  糊一层纯色只会出现色带。侧边卡片靠 alpha（暗 0.55 / 亮 0.85）自然退后。
 
 ## 8. 改完必须跑一遍的验证
 
@@ -217,6 +245,14 @@ adb shell dumpsys power | grep mWakefulness=        # Asleep
 adb shell dumpsys activity recents | grep -c 'app.dsh.running/.MainActivity'   # 应为 0
 adb shell input keyevent 224                        # 唤醒
 adb logcat -d -s TaskSvc                            # 应有 "sleep -> "
+
+# 5) 亮/暗主题跟随系统（原地切换，不能重启 Activity）
+adb shell cmd uimode night yes                      # 立刻变暗色，列表和选中位置不变
+adb shell cmd uimode night no                       # 变回亮色
+# 截图注意：PowerShell/ps 的 `>` 会把 PNG 写坏，必须走 cmd
+cmd /c "adb exec-out screencap -p > shot.png"
+# 图太大读不进上下文时先缩一下（不需要 Pillow）
+ffmpeg -y -i shot.png -vf scale=1152:-1 -q:v 4 shot.jpg
 ```
 
 排查按键「没反应」时的两个陷阱：
