@@ -299,7 +299,7 @@ adb shell input swipe 960 700 960 640 600
 ### 正式签名（release keystore）
 
 - 一次性生成（密码当场输，不回显）：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\make-keystore.ps1`
-  - 产物在 `%USERPROFILE%\.android-keys\taskman-release.jks`（alias `taskman`，RSA 4096 / SHA256withRSA，
+  - 产物在 `%USERPROFILE%\.android-keys\dove.jks`（alias `taskman`，RSA 4096 / SHA256withRSA，
     validity 10000 天，DN `CN=CoolDove, O=CoolDove, C=CN`），**不在仓库里**（`.gitignore` 也挡了
     `*.jks` / `keystore.properties` / `.android-keys/`）。
   - 同时写 `%USERPROFILE%\.android-keys\keystore.properties`（含密码）并设置用户级环境变量
@@ -312,6 +312,8 @@ adb shell input swipe 960 700 960 640 600
 - release 包一旦发出去，**这个 keystore + 密码就是唯一升级路径**：丢了只能换包名重来。
   `make-keystore.ps1` 会打印 SHA-256 指纹，发版时记下来，以后能核对签名是否为同一把。
 - 用 `apksigner verify --print-certs` 自查：debug 包是 `CN=DSH Debug`，正式包应是 `CN=CoolDove`。
+- 完整的出包 / 发版步骤（版本号、产物与资产命名 `taskman-<version>.apk`、notes 只写变更、
+  验证命令、踩坑）见项目技能 `.opencode/skills/release/SKILL.md`，发版前先读它。
 
 ## 10. 未做 / 已知限制
 
